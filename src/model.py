@@ -45,13 +45,14 @@ def build_model(num_classes=config.NUM_CLASSES, pretrained=config.PRETRAINED):
 
 
 def freeze_backbone(model):
-    for name, param in model.named_parameters():
-        if "classifier" not in name:
-            param.requires_grad = False
-
-    for name, param in model.named_parameters():
-        if "blocks.6" in name or "blocks.5" in name or "conv_head" in name:
-            param.requires_grad = True
+    """
+    Few-shot fine-tuning icin:
+    Backbone tamamen dondurulur, sadece classifier acik kalir.
+    """
+    for param in model.parameters():
+        param.requires_grad = False
+    for param in model.classifier.parameters():
+        param.requires_grad = True
 
 
 def unfreeze_backbone(model):
