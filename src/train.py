@@ -12,12 +12,13 @@ from model import build_model, get_device, get_trainable_params
 def compute_class_weights(loader):
     """
     Sınıf dengesizliğini gidermek için ağırlık hesaplar.
-    Weighted loss kullanımı için train loader üzerinden geçer.
     """
     class_counts = np.zeros(config.NUM_CLASSES)
-    for _, labels in loader.dataset.samples:
-        class_counts[labels] += 1
+    for _, label in loader.dataset.samples:
+        class_counts[label] += 1
 
+    # Sıfır olan sınıfları 1 yap (bölme hatası önlenir)
+    class_counts = np.where(class_counts == 0, 1, class_counts)
     total = class_counts.sum()
     weights = total / (config.NUM_CLASSES * class_counts)
     return torch.tensor(weights, dtype=torch.float32)
