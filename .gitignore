@@ -1,0 +1,22 @@
+# Ham veri
+data/raw/
+
+# Kullanılmayan veri seti
+data/processed/tomato_fieldplant/
+
+# Model ağırlıkları
+models/
+
+# Sonuçlar
+results/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Mac
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/

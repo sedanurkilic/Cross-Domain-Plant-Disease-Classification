@@ -1,0 +1,20 @@
+======================================================================
+PlantDoc (Orijinal) - Veri Seti İstatistikleri
+======================================================================
+
+Toplam Sınıf Sayısı: 9
+
+Sınıf Adı                                           Görüntü Sayısı
+----------------------------------------------------------------------
+Tomato Early blight leaf                                        88
+Tomato Septoria leaf spot                                      151
+Tomato leaf                                                     63
+Tomato leaf bacterial spot                                     110
+Tomato leaf late blight                                        111
+Tomato leaf mosaic virus                                        54
+Tomato leaf yellow virus                                        76
+Tomato mold leaf                                                91
+Tomato two spotted spider mites leaf                             2
+----------------------------------------------------------------------
+TOPLAM                                                         746
+======================================================================

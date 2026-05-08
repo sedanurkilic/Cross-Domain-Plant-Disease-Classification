@@ -1,0 +1,121 @@
+import os
+import torch
+import torch.nn as nn
+from torch.optim import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+import numpy as np
+import config
+from dataset import get_plantvillage_loaders
+from model import build_model, get_device, get_trainable_params
+
+
+def compute_class_weights(loader):
+    """
+    Sınıf dengesizliğini gidermek için ağırlık hesaplar.
+    Weighted loss kullanımı için train loader üzerinden geçer.
+    """
+    class_counts = np.zeros(config.NUM_CLASSES)
+    for _, labels in loader.dataset.samples:
+        class_counts[labels] += 1
+
+    total = class_counts.sum()
+    weights = total / (config.NUM_CLASSES * class_counts)
+    return torch.tensor(weights, dtype=torch.float32)
+
+
+def train_one_epoch(model, loader, criterion, optimizer, device):
+    model.train()
+    total_loss, correct, total = 0.0, 0, 0
+
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * images.size(0)
+        preds = outputs.argmax(dim=1)
+        correct += (preds == labels).sum().item()
+        total += images.size(0)
+
+    return total_loss / total, correct / total
+
+
+def validate(model, loader, criterion, device):
+    model.eval()
+    total_loss, correct, total = 0.0, 0, 0
+
+    with torch.no_grad():
+        for images, labels in loader:
+            images, labels = images.to(device), labels.to(device)
+
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            total_loss += loss.item() * images.size(0)
+            preds = outputs.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += images.size(0)
+
+    return total_loss / total, correct / total
+
+
+def train(save_path=None):
+    device = get_device()
+    print(f"Cihaz: {device}")
+
+    train_loader, val_loader = get_plantvillage_loaders()
+    print(f"Train: {len(train_loader.dataset)} goruntu")
+    print(f"Val:   {len(val_loader.dataset)} goruntu")
+
+    model = build_model()
+    model = model.to(device)
+    print(f"Egitilecek parametre sayisi: {get_trainable_params(model):,}")
+
+    # Sinif dengesizligi icin weighted loss
+    class_weights = compute_class_weights(train_loader).to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+    optimizer = Adam(model.parameters(),
+                     lr=config.LEARNING_RATE,
+                     weight_decay=config.WEIGHT_DECAY)
+
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
+
+    best_val_loss = float("inf")
+    epochs_no_improve = 0
+
+    if save_path is None:
+        save_path = os.path.join(config.MODELS_DIR, "plantvillage_best.pth")
+
+    for epoch in range(1, config.NUM_EPOCHS + 1):
+        train_loss, train_acc = train_one_epoch(model, train_loader,
+                                                criterion, optimizer, device)
+        val_loss, val_acc = validate(model, val_loader, criterion, device)
+        scheduler.step(val_loss)
+
+        print(f"Epoch {epoch:02d} | "
+              f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
+              f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), save_path)
+            print(f"  -> Model kaydedildi: {save_path}")
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= config.EARLY_STOPPING:
+                print(f"Early stopping: {config.EARLY_STOPPING} epoch "
+                      f"boyunca val loss iyilesmedi.")
+                break
+
+    print(f"\nEgitim tamamlandi. En iyi val loss: {best_val_loss:.4f}")
+    return save_path
+
+
+if __name__ == "__main__":
+    train()
