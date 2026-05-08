@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import random
 import config
 from dataset import get_plantdoc_loaders
 from model import build_model, freeze_backbone, get_device, get_trainable_params
@@ -13,7 +14,6 @@ def finetune(n_shot, base_model_path=None):
     print(f"Cihaz: {device}")
     print(f"\n{n_shot}-shot fine-tuning basliyor...")
 
-    # Egitilmis PlantVillage modelini yukle
     if base_model_path is None:
         base_model_path = os.path.join(config.MODELS_DIR, "plantvillage_best.pth")
 
@@ -21,27 +21,39 @@ def finetune(n_shot, base_model_path=None):
     model.load_state_dict(torch.load(base_model_path, map_location=device))
     model = model.to(device)
 
-    # Backbone'u dondur, sadece classifier head egitilecek
     freeze_backbone(model)
     print(f"Egitilecek parametre sayisi: {get_trainable_params(model):,}")
 
     finetune_loader, test_loader = get_plantdoc_loaders(n_shot=n_shot)
-    print(f"Finetune: {len(finetune_loader.dataset)} goruntu "
-          f"({n_shot} shot x {config.NUM_CLASSES} sinif)")
-    print(f"Test:     {len(test_loader.dataset)} goruntu (dokunulmamis)")
 
-    # Few-shot'ta sinif basina ornek sayisi cok az oldugu icin
-    # weighted loss burada kullanmiyoruz, overfitting riskini arttirir
+    # Finetune pool'u %80 train / %20 val olarak böl
+    all_finetune = finetune_loader.dataset.samples
+    random.shuffle(all_finetune)
+    cut = int(len(all_finetune) * 0.8)
+    train_samples = all_finetune[:cut]
+    val_samples   = all_finetune[cut:]
+
+    from dataset import LeafDataset, get_train_transform, get_val_transform
+    from torch.utils.data import DataLoader
+
+    train_dataset = LeafDataset(train_samples, transform=get_train_transform())
+    val_dataset   = LeafDataset(val_samples,   transform=get_val_transform())
+
+    train_loader = DataLoader(train_dataset, batch_size=min(n_shot, 8),
+                              shuffle=True,  num_workers=config.NUM_WORKERS)
+    val_loader   = DataLoader(val_dataset,   batch_size=min(n_shot, 8),
+                              shuffle=False, num_workers=config.NUM_WORKERS)
+
+    print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)} | "
+          f"Test: {len(test_loader.dataset)} goruntu")
+
     criterion = nn.CrossEntropyLoss()
-
-    # Sadece egitilecek parametreleri optimizer'a ver
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = Adam(trainable_params,
                      lr=config.FINETUNE_LR,
                      weight_decay=config.WEIGHT_DECAY)
-
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
-    
+
     best_val_loss = float("inf")
     epochs_no_improve = 0
     save_path = os.path.join(config.MODELS_DIR,
@@ -51,34 +63,47 @@ def finetune(n_shot, base_model_path=None):
         # --- Train ---
         model.train()
         total_loss, correct, total = 0.0, 0, 0
-
-        for images, labels in finetune_loader:
+        for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
-
             optimizer.zero_grad()
             outputs = model(images)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-
             total_loss += loss.item() * images.size(0)
             preds = outputs.argmax(dim=1)
             correct += (preds == labels).sum().item()
             total += images.size(0)
-
         train_loss = total_loss / total
         train_acc  = correct / total
 
-        # --- Validation: finetune havuzunun kendisi ---
-        # Not: burada ayri bir val set kullanmiyoruz cunku n_shot zaten
-        # cok kucuk. Train loss'u takip ederek overfitting'i izliyoruz.
-        scheduler.step(train_loss)
+        # --- Validation ---
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(device), labels.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item() * images.size(0)
+                preds = outputs.argmax(dim=1)
+                val_correct += (preds == labels).sum().item()
+                val_total += images.size(0)
 
+        if val_total > 0:
+            val_loss = val_loss / val_total
+            val_acc  = val_correct / val_total
+        else:
+            val_loss = train_loss
+            val_acc  = train_acc
+
+        scheduler.step(val_loss)
         print(f"Epoch {epoch:02d} | "
-              f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f}")
+              f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
+              f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
 
-        if train_loss < best_val_loss:
-            best_val_loss = train_loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             epochs_no_improve = 0
             torch.save(model.state_dict(), save_path)
         else:
