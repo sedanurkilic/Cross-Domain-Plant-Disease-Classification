@@ -1,10 +1,16 @@
-# CLAUDE.md — Cross-Domain-Plant-Disease-Classification
+# CLAUDE.md — Cross-Domain Plant Disease Classification
 
-## Proje Kimliği
-**Başlık:** Cross-Domain Tomato Leaf Disease Classification via Kernel-Guided Attention Transformers with Interpretable Feature Localization  
-**Amaç:** PlantVillage (lab) → PlantDoc (saha) domain adaptation; few-shot fine-tuning baseline üzerine KAT mimarisi ile %60+ accuracy hedefi  
-**Donanım:** Apple M2 Air (MPS backend) — CUDA yok, bellek kısıtlı  
-**Dil:** Python 3.13  
+**Son güncelleme:** 8 Mayıs 2026
+
+---
+
+## Proje Hakkında
+
+Bu proje, domates yaprak hastalıklarını kontrollü laboratuvar ortamından (PlantVillage) saha fotoğraflarına (PlantDoc) taşıma problemini ele alıyor. Temel zorluk şu: lab ortamında %99'un üzerinde doğrulukla çalışan bir model, saha koşullarında dramatik biçimde başarısız oluyor. Bunu domain gap problemi olarak adlandırıyoruz.
+
+Mevcut few-shot fine-tuning yaklaşımı bu boşluğu kapatmak için yetersiz kalıyor — en iyi sonuç 10-shot ile %39 balanced accuracy. Hedef, Kernel-guided Agent Transformer (KAT) mimarisini kullanarak bu oranı %60'ın üzerine çıkarmak.
+
+KAT'ın temel fikri şu: her agent, feature map üzerinde farklı bir görsel örüntüye odaklanıyor — leke, renk bozulması, doku değişimi gibi. Bu sayede model, saha görüntülerindeki değişken koşullara rağmen hastalık belirtilerini doğru bölgelerden okuyabiliyor. Agent çıktıları MLP ile birleştirilerek sınıf kararı veriliyor.
 
 ---
 
@@ -12,147 +18,121 @@
 
 ```
 plant_disease_project/
-├── src/                        # Ana pipeline
-│   ├── config.py               # Tüm sabitler buradan okunur — dokunmadan önce sor
-│   ├── dataset.py              # LeafDataset, PlantVillage/PlantDoc loaders, few-shot sampling
-│   ├── model.py                # EfficientNet-B0, freeze/unfreeze fonksiyonları
-│   ├── train.py                # PlantVillage eğitimi (weighted CrossEntropy)
-│   ├── fewshot_finetune.py     # PlantDoc few-shot fine-tuning (5/10-shot), train/val split var
-│   ├── evaluate.py             # Baseline + few-shot değerlendirme, confusion matrix
-│   ├── gradcam_utils.py        # GradCAM altyapısı, overlay, figure generation
-│   ├── gradcam_baseline.py     # Baseline model GradCAM görseli
-│   └── gradcam_fewshot.py      # Few-shot model GradCAM görseli
+├── src/
+│   ├── config.py               # Tüm sabitler burada — değiştirmeden önce mutlaka sor
+│   ├── dataset.py              # Veri yükleme, augmentation, few-shot sampling
+│   ├── model.py                # EfficientNet-B0, freeze/unfreeze yardımcıları
+│   ├── model_kat.py            # KAT modeli — bu oturumda tamamlandı
+│   ├── train.py                # PlantVillage üzerinde baseline eğitimi
+│   ├── fewshot_finetune.py     # PlantDoc few-shot fine-tuning (5 ve 10-shot)
+│   ├── evaluate.py             # Tüm modellerin değerlendirilmesi
+│   ├── gradcam_utils.py        # GradCAM altyapısı ve görselleştirme
+│   ├── gradcam_baseline.py     # Baseline model için GradCAM
+│   └── gradcam_fewshot.py      # Few-shot modeller için GradCAM
+├── scripts/
+│   └── smoke_kat.py            # KATModel forward pass testi
 ├── data/
 │   └── processed/
-│       ├── tomato_plantvillage/  # ~280MB, kaynak domain
-│       └── tomato_plantdoc/      # ~231MB, hedef domain
+│       ├── tomato_plantvillage/
+│       └── tomato_plantdoc/
 ├── .gitignore
 └── CLAUDE.md
 ```
 
-**NOT:** `rac/`, `models/`, `results/`, `data/raw/`, `data/processed/tomato_fieldplant/` gitignore'da — repoda yok.
+`models/`, `results/`, `data/raw/`, `data/processed/tomato_fieldplant/` gitignore kapsamında — repoda bulunmuyor.
 
 ---
 
-## Çalışma Sırası (Mevcut Pipeline)
+## Mevcut Sonuçlar
 
-```bash
-cd src/
+| Model                 | Accuracy | Balanced Acc | Durum        |
+|-----------------------|----------|--------------|--------------|
+| EfficientNet Baseline | 0.2943   | 0.2517       | Tamamlandı   |
+| EfficientNet 5-shot   | 0.3763   | 0.3770       | Tamamlandı   |
+| EfficientNet 10-shot  | 0.3880   | 0.3989       | Tamamlandı   |
+| KAT Baseline          | —        | —            | Sırada       |
+| KAT 5-shot            | —        | —            | Sırada       |
+| KAT 10-shot           | —        | —            | Sırada       |
 
-# 1. PlantVillage'de EfficientNet-B0 eğit
-python train.py
-# Çıktı: models/plantvillage_best.pth
+Hedef: KAT 10-shot balanced accuracy > 0.60
 
-# 2. Few-shot fine-tuning (5-shot ve 10-shot)
-python fewshot_finetune.py
-# Çıktı: models/plantdoc_5shot_best.pth, models/plantdoc_10shot_best.pth
+---
 
-# 3. Tüm modelleri değerlendir
-python evaluate.py
-# Çıktı: results/metrics/*.json, results/figures/*_confusion_matrix.png
+## KAT Mimarisi
 
-# 4. GradCAM görselleştirme
-python gradcam_baseline.py
-python gradcam_fewshot.py
+Model şu akışı izliyor:
+
+```
+EfficientNet-B0 (dondurulmuş backbone)
+    → forward_features → (B, 1280, 7, 7)
+    → 1x1 Conv projection → (B, 256, 7, 7)
+    → spatial flatten → (B, 49, 256)
+    → Cross-attention: 8 agent query × 49 spatial token
+    → agent outputs → (B, 8, 256)
+    → LayerNorm → Flatten → (B, 2048)
+    → MLP: 2048 → 512 → 256 → NUM_CLASSES
 ```
 
----
+Her agent farklı bir görsel örüntüye odaklanıyor. Hangi bölgeye ne kadar dikkat ettiği, attention map olarak geri dönebiliyor — bu da yorumlanabilirlik açısından önemli.
 
-## Mevcut Sonuçlar (Kıyaslama Tablosu)
+Config'deki KAT sabitleri:
 
-| Model                  | Accuracy | Balanced Acc | Durum      |
-|------------------------|----------|--------------|------------|
-| EfficientNet Baseline  | 0.2943   | 0.2517       | Tamamlandı |
-| EfficientNet 5-shot    | 0.3763   | 0.3770       | Tamamlandı |
-| EfficientNet 10-shot   | 0.3880   | 0.3989       | Tamamlandı |
-
-**Hedef:** KAT mimarisi ile 10-shot Balanced Accuracy > 0.60
-
----
-
-## Mimari Kararlar
-
-### Backbone
-- EfficientNet-B0 (timm kütüphanesi)
-- `freeze_backbone()`: backbone tamamen dondurulur, sadece classifier açık
-- `unfreeze_for_finetuning()`: blocks[5], blocks[6], conv_head, classifier açık
-- `freeze_all_except_classifier()`: MMD stage 1 için, her şey dondurulur
-
-### Domain Adaptation Yaklaşımı
-- Kaynak: PlantVillage (kontrollü lab, ~13K görüntü)
-- Hedef: PlantDoc (saha fotoğrafları, değişken koşullar)
-- Mevcut strateji: Few-shot fine-tuning (yetersiz, baseline)
-- Hedef strateji: KAT — Prototype Attention + MLP classifier
-
-### Loss
-- PlantVillage eğitimi: weighted CrossEntropyLoss
-- Few-shot fine-tuning: düz CrossEntropyLoss
-
----
-
-## Aktif Geliştirme: KAT Entegrasyonu
-
-### Hedef Mimari
-```
-EfficientNet-B0 backbone (dondurulmuş)
-    ↓
-Feature Map (7x7x1280)
-    ↓
-Prototype Attention (N agent, her biri farklı visual pattern'e odaklanır)
-    ↓  
-Agent Representations (N x 256)
-    ↓
-MLP Classifier → sınıf logitleri
+```python
+KAT_NUM_AGENTS  = 8
+KAT_AGENT_DIM   = 256
+KAT_MLP_HIDDEN  = [512, 256]
+KAT_DROPOUT     = 0.3
 ```
 
-### Agent Mantığı
-- Her agent = farklı bir hastalık belirtisi (leke, renk değişimi, doku bozulması vb.)
-- Agent'lar feature map üzerinde cross-attention yaparak ilgili bölgeyi bulur
-- Tüm agent çıktıları MLP'de birleştirilir → sınıf kararı
-
-### Sıradaki Dosyalar
-| Dosya | Durum | Açıklama |
-|-------|-------|----------|
-| `src/model_kat.py` | Yapılacak | EfficientNet + Prototype Attention + MLP |
-| `src/train_kat.py` | Yapılacak | KAT eğitimi, PlantVillage üzerinde |
-| `src/fewshot_kat.py` | Yapılacak | Sadece agent_queries fine-tune |
-| `src/evaluate_kat.py` | Yapılacak | KAT sonuçlarını baseline ile karşılaştır |
+Smoke-test sonucu (8 Mayıs 2026):
+- logits shape: (1, 8) — doğru
+- attention maps shape: (1, 8, 7, 7) — doğru
+- Eğitilebilir parametre sayısı: 1,512,968
 
 ---
 
-## Kurallar (Claude için)
+## Sıradaki Adımlar
 
-- **Her değişiklik tek bir şeyi hedefler.** Birden fazla dosyayı aynı anda değiştirme.
-- **Her çalışan değişiklik = 1 commit.** Format: `feat:` / `fix:` / `exp:`
-- **config.py'a dokunmadan önce sor.** Tüm sabitler oradan okunuyor.
-- **MPS uyumluluğunu koru.** CUDA-only operasyonlar kullanma.
-- **Test etmeden öneri sunma.** Değişikliği önerirken nasıl test edileceğini belirt.
-- **Büyük fikir atlamalar yapma.** Her adımı kullanıcıyla birlikte onayla.
-- **Saçmaladığında dur.** Kullanıcı müdahale edecek.
+Öncelik sırasıyla:
+
+1. `src/train_kat.py` — KATModel'i PlantVillage üzerinde eğit, modeli kaydet
+2. `src/fewshot_kat.py` — sadece agent_queries'i fine-tune et, backbone donuk kalır
+3. `src/evaluate_kat.py` — KAT sonuçlarını baseline tablosuyla karşılaştır
+
+---
+
+## Çalışma Kuralları
+
+Bu proje boyunca şu kurallara uyuyoruz:
+
+Her değişiklik tek bir amaca hizmet eder. Birden fazla dosyayı aynı anda değiştirmek yok. Bir şeyi değiştirmeden önce neden değiştireceğini açıkla, onay al.
+
+Her çalışan değişiklik bir commit. Mesaj formatı: `feat:` yeni özellik, `fix:` hata düzeltme, `exp:` deney. Push'u unutma.
+
+`config.py` dokunulmaz bölge. Değiştirmen gerekiyorsa önce söyle, neden gerektiğini açıkla.
+
+MPS uyumluluğu şart. CUDA'ya özel operasyonlar kullanma — cihaz M2 Air.
+
+Her oturum sonunda CLAUDE.md'yi güncelle ve commit at. Bir sonraki oturumda buradan başlıyoruz, eksik bilgi bırakma.
+
+Büyük fikirlere atlamak yok. Her adımı birlikte değerlendiriyoruz. Saçmalamaya başlarsan kullanıcı müdahale edecek.
+
+---
+
+## Commit Geçmişi
+
+| Tarih       | Commit                              | Açıklama                                        |
+|-------------|-------------------------------------|-------------------------------------------------|
+| 8 Mayıs     | init                                | Temiz proje kurulumu                            |
+| 8 Mayıs     | fix: freeze_backbone                | Classifier açık kalacak şekilde düzeltildi      |
+| 8 Mayıs     | fix: compute_class_weights          | Sıfır bölme koruması eklendi                    |
+| 8 Mayıs     | fix: fewshot_finetune validation    | Train/val split, early stopping val loss'a göre |
+| 8 Mayıs     | feat: add KATModel                  | Prototype attention + MLP, smoke-test geçti     |
 
 ---
 
 ## Bağımlılıklar
 
 ```
-torch (MPS destekli)
-torchvision
-timm
-albumentations
-scikit-learn
-matplotlib
-seaborn
-Pillow
-numpy
+torch, timm, albumentations, scikit-learn, matplotlib, seaborn, Pillow, numpy
 ```
-
----
-
-## Commit Geçmişi
-
-| Commit | Açıklama |
-|--------|----------|
-| `init` | Temiz proje, kod + plantdoc + plantvillage |
-| `fix: freeze_backbone` | Classifier açık kalacak şekilde düzeltildi |
-| `fix: compute_class_weights` | Sıfır bölme koruması eklendi |
-| `fix: fewshot_finetune validation` | Train/val split, early stopping val loss'a göre |
