@@ -46,6 +46,12 @@ MMD_KERNEL_NUM  = 5         # RBF kernel sayisi
 UDA_BATCH_SIZE  = 16        # PlantDoc referans batch boyutu
 FEATURE_DIM     = 512      # EfficientNet 1280
 
+# KAT (Kernel-guided Agent Transformers) - lightweight tunables
+KAT_NUM_AGENTS = 8
+KAT_AGENT_DIM  = 256
+KAT_MLP_HIDDEN = [512, 256]
+KAT_DROPOUT    = 0.3
+
 # Few-shot fine-tuning
 FEW_SHOT_COUNTS = [5, 10]   # her ikisini de deneceğiz
 FINETUNE_EPOCHS = 30
