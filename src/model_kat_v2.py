@@ -173,9 +173,9 @@ class KATModelV2(nn.Module):
         if return_attentions:
             # attn: (B, num_heads, num_agents, K_len) → (B, num_heads, num_agents, Hf, Wf)
             attn_maps = attn.view(B, self.num_heads, self.num_agents, Hf, Wf)
-            return logits, attn_maps
+            return logits, agent_out, attn_maps
 
-        return logits
+        return logits, agent_out
 
 
 def build_kat_v2(**kwargs):
@@ -192,6 +192,7 @@ if __name__ == "__main__":
     print(f"Trainable params: {trainable:,}")
 
     x      = torch.zeros(2, 3, 224, 224, device=device)
-    logits, attn = model(x, return_attentions=True)
+    logits, agent_out, attn = model(x, return_attentions=True)
     print(f"logits shape:     {logits.shape}")
+    print(f"agent_out shape:  {agent_out.shape}")
     print(f"attn_maps shape:  {attn.shape}")

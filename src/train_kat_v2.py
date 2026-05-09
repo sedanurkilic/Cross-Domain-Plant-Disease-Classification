@@ -19,7 +19,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
         images, labels = images.to(device), labels.to(device)
 
         optimizer.zero_grad()
-        outputs = model(images)
+        outputs, _ = model(images)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -40,7 +40,7 @@ def validate(model, loader, criterion, device):
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
 
-            outputs = model(images)
+            outputs, _ = model(images)
             loss = criterion(outputs, labels)
 
             total_loss += loss.item() * images.size(0)

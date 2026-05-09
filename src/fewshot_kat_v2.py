@@ -6,6 +6,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, confusion_matrix
 
@@ -58,20 +59,27 @@ def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(trainable_params, lr=config.FINETUNE_LR, weight_decay=1e-5)
 
-    for epoch in range(1, 41):
+    for epoch in range(1, 51):
         model.train()
         train_losses = []
         for imgs, labels in train_loader:
             imgs, labels = imgs.to(device), labels.to(device)
             optimizer.zero_grad()
-            logits = model(imgs)
-            loss = criterion(logits, labels)
+            logits, agent_out = model(imgs)
+            ce_loss  = criterion(logits, labels)
+            # diversity loss — penalise cosine similarity between agent vectors
+            agent_n  = F.normalize(agent_out, dim=-1)          # (B, N, D)
+            sim      = torch.bmm(agent_n, agent_n.transpose(1, 2))  # (B, N, N)
+            eye_mask = torch.eye(sim.shape[1], device=sim.device).bool().unsqueeze(0)
+            sim      = sim.masked_fill(eye_mask, 0.0)
+            div_loss = sim.sum() / (agent_out.shape[0] * sim.shape[1] * (sim.shape[1] - 1))
+            loss     = ce_loss + 0.01 * div_loss
             loss.backward()
             optimizer.step()
             train_losses.append(loss.item())
 
         avg_train_loss = sum(train_losses) / max(1, len(train_losses))
-        print(f"Epoch {epoch}/40 — train_loss={avg_train_loss:.4f}")
+        print(f"Epoch {epoch}/50 — train_loss={avg_train_loss:.4f}")
         torch.save(model.state_dict(), save_path)
 
         if test_loader is not None and epoch % eval_every == 0:
@@ -79,7 +87,8 @@ def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path
             all_preds, all_targets = [], []
             with torch.no_grad():
                 for imgs, labels in test_loader:
-                    preds = model(imgs.to(device)).argmax(1).cpu().numpy()
+                    logits, _ = model(imgs.to(device))
+                    preds = logits.argmax(1).cpu().numpy()
                     all_preds.extend(preds.tolist())
                     all_targets.extend(labels.numpy().tolist())
             acc = accuracy_score(all_targets, all_preds)
@@ -93,7 +102,8 @@ def evaluate_and_save(model: KATModelV2, test_loader: DataLoader, device, out_pr
     with torch.no_grad():
         for imgs, labels in test_loader:
             imgs = imgs.to(device)
-            preds = model(imgs).argmax(dim=1).cpu().numpy()
+            logits, _ = model(imgs)
+            preds = logits.argmax(dim=1).cpu().numpy()
             all_preds.extend(preds.tolist())
             all_targets.extend(labels.numpy().tolist())
 
