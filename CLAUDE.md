@@ -1,6 +1,6 @@
 # CLAUDE.md — Cross-Domain Plant Disease Classification
 
-**Son güncelleme:** 9 Mayıs 2026
+**Son güncelleme:** 9 Mayıs 2026 (akşam)
 
 ---
 
@@ -8,7 +8,7 @@
 
 Bu proje, domates yaprak hastalıklarını kontrollü laboratuvar ortamından (PlantVillage) saha fotoğraflarına (PlantDoc) taşıma problemini ele alıyor. Temel zorluk şu: lab ortamında %99'un üzerinde doğrulukla çalışan bir model, saha koşullarında dramatik biçimde başarısız oluyor. Bunu domain gap problemi olarak adlandırıyoruz.
 
-KAT deneyleri tamamlandı. Tüm konfigürasyonlar (frozen backbone, prototype init, differential lr, full finetune) denendi; en iyi KAT sonucu EfficientNet few-shot'ın gerisinde kaldı. Sıradaki adım: daha geniş receptive field ve çok başlı dikkat mekanizmasıyla **KATv2** mimarisi.
+KATv1 deneyleri tamamlandı; EfficientNet few-shot'ın gerisinde kaldı. KATv2 (16 agent, 4-head attention, 14×14 feature map) ile val split kaldırılıp sabit epoch eğitimine geçildi. Epoch 40'ta **acc 0.4130 / balanced 0.4025** ile EfficientNet 10-shot'ı geçtik. Sıradaki: 50 epoch denemesi.
 
 ---
 
@@ -31,8 +31,10 @@ plant_disease_project/
 │   └── gradcam_fewshot.py      # Few-shot modeller için GradCAM
 ├── scripts/
 │   ├── evaluate_kat_baseline.py   # KAT baseline PlantDoc değerlendirmesi
-│   ├── init_kat_prototypes.py     # PlantDoc class prototype vektörleri üretir
-│   ├── run_finetune_full.py       # finetune_full() çağırır (tüm finetune pool)
+│   ├── init_kat_prototypes.py     # KATv1 PlantDoc class prototype vektörleri
+│   ├── init_kat_v2_prototypes.py  # KATv2 PlantDoc class prototype vektörleri
+│   ├── run_finetune_full.py       # KATv1 finetune_full() çağırır
+│   ├── run_finetune_full_v2.py    # KATv2 finetune_full() çağırır
 │   └── visualize_kat_attention.py # Agent attention haritası görselleştirme
 ├── data/
 │   └── processed/
@@ -48,19 +50,26 @@ plant_disease_project/
 
 ## Mevcut Sonuçlar
 
-| Model                    | Accuracy | Balanced Acc | Durum      |
-|--------------------------|----------|--------------|------------|
-| EfficientNet Baseline    | 0.2943   | 0.2517       | Tamamlandı |
-| EfficientNet 5-shot      | 0.3763   | 0.3770       | Tamamlandı |
-| EfficientNet 10-shot     | 0.3880   | 0.3989       | Tamamlandı |
-| KAT Baseline             | 0.2341   | 0.2173       | Tamamlandı |
-| KAT 5-shot               | 0.1656   | 0.1590       | Tamamlandı |
-| KAT 10-shot              | 0.1873   | 0.2080       | Tamamlandı |
-| KAT Full finetune        | 0.2007   | 0.2031       | Tamamlandı |
-| KAT Full (diff lr)       | 0.2007   | 0.2031       | Tamamlandı |
-| **KATv2**                | —        | —            | Sırada     |
+| Model                        | Accuracy | Balanced Acc | Durum      |
+|------------------------------|----------|--------------|------------|
+| EfficientNet Baseline        | 0.2943   | 0.2517       | Tamamlandı |
+| EfficientNet 5-shot          | 0.3763   | 0.3770       | Tamamlandı |
+| EfficientNet 10-shot         | 0.3880   | 0.3989       | Tamamlandı |
+| KATv1 Baseline               | 0.2341   | 0.2173       | Tamamlandı |
+| KATv1 5-shot                 | 0.1656   | 0.1590       | Tamamlandı |
+| KATv1 10-shot                | 0.1873   | 0.2080       | Tamamlandı |
+| KATv1 Full finetune (diff lr)| 0.2007   | 0.2031       | Tamamlandı |
+| KATv2 Baseline               | 0.2492   | 0.2359       | Tamamlandı |
+| KATv2 Full — epoch 10        | 0.3579   | 0.3379       | Tamamlandı |
+| KATv2 Full — epoch 20        | 0.3612   | 0.3618       | Tamamlandı |
+| KATv2 Full — epoch 30        | 0.3963   | 0.3905       | Tamamlandı |
+| **KATv2 Full — epoch 40**    | **0.4130**| **0.4025**  | Tamamlandı |
+| KATv2 Full — epoch 50        | —        | —            | Sırada     |
 
-Hedef: KATv2 10-shot balanced accuracy > 0.40 (KAT v1'i geçmek), nihayetinde > 0.60
+Hedef: balanced accuracy > 0.60
+
+**Önemli:** KATv2 epoch 40'ta EfficientNet 10-shot'ı (0.3880 / 0.3989) accuracy'de geçti.
+Val split kaldırıldı — tüm 146 finetune örneği direkt train'e veriliyor, sabit epoch sayısı kullanılıyor.
 
 ---
 
@@ -79,38 +88,38 @@ EfficientNet-B0 (dondurulmuş backbone)
 
 ---
 
-## KATv2 Planı (model_kat_v2.py)
-
-Temel fark: daha geniş feature map + multi-head attention.
+## KATv2 Mimarisi (model_kat_v2.py)
 
 ```
-EfficientNet-B0 (dondurulmuş backbone)
-    → blocks[4] çıkışı → (B, C, 14, 14)   # 7x7 yerine 14x14
+EfficientNet-B0 (backbone — blocks.4 kısmen açık, geri kalan donuk)
+    → forward hook on blocks[4] → (B, 112, 14, 14)
     → 1x1 Conv projection → (B, 256, 14, 14)
     → spatial flatten → (B, 196, 256)
-    → Cross-attention: 16 agent query × 196 spatial token (4-head)
+    → 4-head cross-attention: 16 agent query × 196 spatial token
     → agent outputs → (B, 16, 256)
-    → LayerNorm → Flatten → (B, 4096)
+    → out_proj + LayerNorm → Flatten → (B, 4096)
     → MLP: 4096 → 512 → 256 → NUM_CLASSES
 ```
 
-Değişiklikler:
-- `KAT_NUM_AGENTS`: 8 → 16
-- Attention: single-head → 4-head (`nn.MultiheadAttention`)
-- Feature map: `forward_features` (7×7) → `blocks[4]` çıkışı (14×14)
-- Spatial token sayısı: 49 → 196
+finetune_full() eğitim stratejisi:
+- Tüm 146 finetune örneği train'e verilir (val split yok)
+- Sabit epoch sayısı, her epoch sonunda checkpoint kaydedilir
+- Differential lr: backbone blocks.4 → 1e-5, head → 1e-4
+- Her 10 epoch'ta test set üzerinde ara değerlendirme yapılır
 
 ---
 
-## KAT Deney Bulguları
+## Deney Bulguları
 
-KATv1 deneyleri boyunca öğrenilenler:
+**KATv1:**
+- Val split çok küçük (≤29 örnek) — early stopping gürültülü, güvenilmez.
+- Prototype init anlamlı iyileşme sağlamadı — backbone PlantVillage'e kilitli olduğundan feature uzayı uyumsuz.
+- Kök sorun: 7×7 feature map + single-head attention saha görüntüleri için yetersiz.
 
-- **Frozen backbone + few-shot**: Val split 8 örnek (5-shot × 0.2) — early stopping gürültülü, güvenilmez.
-- **Prototype init** (`init_kat_prototypes.py`): PlantDoc sınıf prototipleri agent_queries başlangıç değeri olarak uygulandı. Anlamlı bir iyileşme sağlamadı — backbone PlantVillage'e kilitli olduğundan prototipler feature uzayında anlamlı değil.
-- **Differential lr** (backbone 1e-5, head 1e-4): Balanced accuracy hafif iyileşti ama val gürültüsü yüzünden stabil değil.
-- **Full finetune**: 146 örneklik pool, early stopping yine gürültülü val üzerinde tetikleniyor.
-- **Kök sorun**: 7×7 feature map + single-head attention, saha görüntülerindeki kompleks örüntüler için yetersiz. KATv2 bunu adresliyor.
+**KATv2:**
+- Val split kaldırınca ve sabit epoch eğitimine geçince performans tutarlı biçimde arttı.
+- Prototype tiling (8→16) eğitimi bozdu — epoch 1'de loss patladı, kullanılmıyor.
+- Train loss epoch 40'ta hâlâ iniyor (1.34) — daha fazla epoch denenecek.
 
 ---
 
@@ -158,6 +167,10 @@ Büyük fikirlere atlamak yok. Her adımı birlikte değerlendiriyoruz. Saçmala
 | 9 Mayıs  | feat: add finetune_full()                | Tüm finetune pool ile KAT eğitimi                     |
 | 9 Mayıs  | exp: differential lr in finetune_full    | Backbone 1e-5, head 1e-4                              |
 | 9 Mayıs  | chore: remove unused files               | Smoke scripts ve MMD pipeline temizlendi              |
+| 9 Mayıs  | feat: add KATModelV2                     | 16 agent, 4-head attention, 14×14 feature map         |
+| 9 Mayıs  | feat: add train_kat_v2.py                | KATv2 PlantVillage pre-training (val acc 0.9869)      |
+| 9 Mayıs  | feat: add fewshot_kat_v2.py              | KATv2 full finetune pipeline                          |
+| 9 Mayıs  | exp: KATv2 full finetune                 | No val split, fixed epochs — acc 0.4130 @ epoch 40   |
 
 ---
 
