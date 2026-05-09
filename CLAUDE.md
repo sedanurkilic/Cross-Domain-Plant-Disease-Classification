@@ -104,6 +104,19 @@ Smoke-test sonucu (8 Mayıs 2026):
 
 ---
 
+## Attention Map Analizi
+
+Visualize_kat_attention.py ile PlantDoc test setindeki örneklerin agent attention haritaları incelendi. Öne çıkan bulgular:
+
+- Class 7 (Septoria) ve Class 3 (Late Blight) en iyi sonuç — agent'lar hastalık bölgelerine net şekilde odaklanıyor.
+- Class 4 (Leaf Miner) veri kalitesi sorunu var — birçok görüntüde watermark mevcut ve model watermark'ı öğreniyor.
+- Class 1 ve 6'da birden fazla yaprak aynı karede bulunuyor; agent'lar hangi yaprağa bakacağını kesin olarak seçemiyor.
+- Class 2 ve 5'te backbone büyük ölçüde PlantVillage'e kilitli görünüyor; agent'lar arka plana veya saha özelliklerine odaklanabiliyor, hastalık bölgelerine değil.
+
+Sıradaki önerilen adım: `unfreeze_for_finetuning()` ile backbone'u kısmen açıp (ör. son bloklar) few-shot fine-tuning'i tekrar denemek; böylece backbone, PlantDoc saha özelliklerine adapte olabilir ve agent'ların odaklanması iyileşebilir.
+
+---
+
 ## Çalışma Kuralları
 
 Bu proje boyunca şu kurallara uyuyoruz:
