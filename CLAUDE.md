@@ -1,6 +1,6 @@
 # CLAUDE.md — Cross-Domain Plant Disease Classification
 
-**Son güncelleme:** 9 Mayıs 2026 (akşam)
+**Son güncelleme:** 10 Mayıs 2026
 
 ---
 
@@ -8,7 +8,7 @@
 
 Bu proje, domates yaprak hastalıklarını kontrollü laboratuvar ortamından (PlantVillage) saha fotoğraflarına (PlantDoc) taşıma problemini ele alıyor. Temel zorluk şu: lab ortamında %99'un üzerinde doğrulukla çalışan bir model, saha koşullarında dramatik biçimde başarısız oluyor. Bunu domain gap problemi olarak adlandırıyoruz.
 
-KATv1 deneyleri tamamlandı; EfficientNet few-shot'ın gerisinde kaldı. KATv2 (16 agent, 4-head attention, 14×14 feature map) ile val split kaldırılıp sabit epoch eğitimine geçildi. Epoch 40'ta **acc 0.4130 / balanced 0.4025** ile EfficientNet 10-shot'ı geçtik. Sıradaki: 50 epoch denemesi.
+KATv1 deneyleri tamamlandı; EfficientNet few-shot'ın gerisinde kaldı. KATv2 (16 agent, 4-head attention, 14×14 feature map) ile val split kaldırılıp sabit epoch eğitimine geçildi. Diversity loss (lambda=0.01, cosine sim cezası) eklenerek epoch 60'ta **acc 0.4565 / balanced 0.4510** elde edildi. Sıradaki: 5-fold cross-validation + AdaBN.
 
 ---
 
@@ -60,16 +60,25 @@ plant_disease_project/
 | KATv1 10-shot                | 0.1873   | 0.2080       | Tamamlandı |
 | KATv1 Full finetune (diff lr)| 0.2007   | 0.2031       | Tamamlandı |
 | KATv2 Baseline               | 0.2492   | 0.2359       | Tamamlandı |
-| KATv2 Full — epoch 10        | 0.3579   | 0.3379       | Tamamlandı |
-| KATv2 Full — epoch 20        | 0.3612   | 0.3618       | Tamamlandı |
-| KATv2 Full — epoch 30        | 0.3963   | 0.3905       | Tamamlandı |
-| **KATv2 Full — epoch 40**    | **0.4130**| **0.4025**  | Tamamlandı |
-| KATv2 Full — epoch 50        | —        | —            | Sırada     |
+| KATv2 Full — epoch 40        | 0.4130   | 0.4025       | Tamamlandı |
+| KATv2 Full + div loss — ep10 | 0.3361   | 0.3354       | Tamamlandı |
+| KATv2 Full + div loss — ep20 | 0.3612   | 0.3588       | Tamamlandı |
+| KATv2 Full + div loss — ep30 | 0.3946   | 0.3898       | Tamamlandı |
+| KATv2 Full + div loss — ep40 | 0.4130   | 0.4074       | Tamamlandı |
+| KATv2 Full + div loss — ep50 | 0.4247   | 0.4302       | Tamamlandı |
+| **KATv2 Full + div loss — ep60** | **0.4565** | **0.4510** | Tamamlandı |
 
 Hedef: balanced accuracy > 0.60
 
-**Önemli:** KATv2 epoch 40'ta EfficientNet 10-shot'ı (0.3880 / 0.3989) accuracy'de geçti.
+**Önemli:** KATv2 epoch 40'ta EfficientNet 10-shot'ı (0.3880 / 0.3989) accuracy'de geçti. Epoch 60'ta balanced accuracy 0.4510'a ulaştı; train_loss=1.2945, trend hâlâ iniyor.
+
 Val split kaldırıldı — tüm 146 finetune örneği direkt train'e veriliyor, sabit epoch sayısı kullanılıyor.
+
+### ⚠️ Metodoloji Uyarısı
+
+**Şu an test setine bakarak epoch seçiyoruz — bu data leakage'dır.** Her 10 epoch'ta test sonucuna bakıp "daha fazla eğitelim" kararı vermek, modeli dolaylı olarak test setine göre seçmek anlamına gelir. Bu durum, raporlanan metriklerin gerçek genelleme performansından iyimser olmasına yol açar.
+
+Doğru yaklaşım: test setine hiç bakmadan epoch sayısına karar vermek. Bunu yapmanın tek güvenilir yolu 5-fold cross-validation — fold'ların ortalaması erken durma / epoch seçimi için kullanılır, test seti yalnızca final değerlendirmede açılır.
 
 ---
 
@@ -119,7 +128,30 @@ finetune_full() eğitim stratejisi:
 **KATv2:**
 - Val split kaldırınca ve sabit epoch eğitimine geçince performans tutarlı biçimde arttı.
 - Prototype tiling (8→16) eğitimi bozdu — epoch 1'de loss patladı, kullanılmıyor.
-- Train loss epoch 40'ta hâlâ iniyor (1.34) — daha fazla epoch denenecek.
+- Diversity loss (lambda=0.01) epoch 50'de balanced acc'ı 0.4290'a taşıdı (önceki best: 0.4025 @ epoch 40).
+- Epoch 60'ta acc 0.4565 / balanced 0.4510; train_loss=1.2945 — loss hâlâ iniyor, plateau yok.
+- **Metodoloji sorunu:** test setine bakarak epoch seçildi → 5-fold CV ile düzeltilmeli.
+
+---
+
+## Sıradaki Adımlar
+
+### a) 5-Fold Cross-Validation
+
+146 finetune örneğini 5 fold'a böl. Her fold için: 4 fold'u train'e ver, 1 fold'u val'e ayır, sabit epoch sayısıyla eğit, val metriğini kaydet. 5 fold ortalaması epoch sayısı kararı için kullanılır — test seti bu aşamada hiç açılmaz. Sonra seçilen epoch sayısıyla tüm 146 örnek üzerinde yeniden eğit, yalnızca o zaman test setini aç.
+
+### b) AdaBN (Adaptive Batch Normalization)
+
+Inference-time domain adaptation — eğitim kodu değişmez, sadece değerlendirme adımına eklenir.
+
+**Nasıl çalışır:**
+1. Model checkpoint yüklendikten sonra `model.train()` moduna al.
+2. PlantDoc finetune görüntüleriyle (veya test görüntüleriyle) birkaç forward pass yap — gradient hesaplanmaz (`torch.no_grad()`), sadece BN running stats (running_mean, running_var) güncellenir.
+3. `model.eval()` moduna geç, test setini değerlendir.
+
+**Amaç:** Backbone'daki BN katmanları PlantVillage istatistikleriyle dolu; PlantDoc görüntülerini göstererek bu istatistikleri saha dağılımına yakınsatmak.
+
+**Not:** KATv2'de backbone büyük ölçüde dondurulmuş olsa da blocks[4] açık — o bloktaki BN istatistikleri güncellenecek.
 
 ---
 
@@ -171,6 +203,8 @@ Büyük fikirlere atlamak yok. Her adımı birlikte değerlendiriyoruz. Saçmala
 | 9 Mayıs  | feat: add train_kat_v2.py                | KATv2 PlantVillage pre-training (val acc 0.9869)      |
 | 9 Mayıs  | feat: add fewshot_kat_v2.py              | KATv2 full finetune pipeline                          |
 | 9 Mayıs  | exp: KATv2 full finetune                 | No val split, fixed epochs — acc 0.4130 @ epoch 40   |
+| 10 Mayıs | exp: add diversity loss to KATv2         | Balanced acc 0.4290 @ ep50, 0.4510 @ ep60             |
+| 10 Mayıs | docs: update CLAUDE.md                   | Diversity loss sonuçları, metodoloji uyarısı, CV + AdaBN planı |
 
 ---
 
