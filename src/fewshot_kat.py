@@ -66,6 +66,12 @@ def set_requires_grad_for_kat(model: KATModel):
     for p in model.classifier.parameters():
         p.requires_grad = True
 
+    # Also unfreeze last backbone blocks and conv_head similar to model.unfreeze_for_finetuning()
+    # Be permissive about parameter name prefixes (e.g., 'backbone.blocks.5...')
+    for name, param in model.named_parameters():
+        if any(k in name for k in ("blocks.6", "conv_head")):
+            param.requires_grad = True
+
 
 def train_fewshot(model: KATModel, train_loader: DataLoader, val_loader: DataLoader, device, save_path: str):
     criterion = nn.CrossEntropyLoss(weight=compute_class_weights_from_loader(train_loader).to(device))
