@@ -1,6 +1,6 @@
 # CLAUDE.md — Cross-Domain Plant Disease Classification
 
-**Son güncelleme:** 8 Mayıs 2026
+**Son güncelleme:** 9 Mayıs 2026
 
 ---
 
@@ -23,6 +23,7 @@ plant_disease_project/
 │   ├── dataset.py              # Veri yükleme, augmentation, few-shot sampling
 │   ├── model.py                # EfficientNet-B0, freeze/unfreeze yardımcıları
 │   ├── model_kat.py            # KAT modeli — bu oturumda tamamlandı
+│   ├── train_kat.py            # KAT eğitim pipeline
 │   ├── train.py                # PlantVillage üzerinde baseline eğitimi
 │   ├── fewshot_finetune.py     # PlantDoc few-shot fine-tuning (5 ve 10-shot)
 │   ├── evaluate.py             # Tüm modellerin değerlendirilmesi
@@ -30,7 +31,9 @@ plant_disease_project/
 │   ├── gradcam_baseline.py     # Baseline model için GradCAM
 │   └── gradcam_fewshot.py      # Few-shot modeller için GradCAM
 ├── scripts/
-│   └── smoke_kat.py            # KATModel forward pass testi
+│   ├── smoke_kat.py            # KATModel forward pass testi
+│   ├── run_smoke_train_kat.py  # temporary smoke-run wrapper for train_kat
+│   └── evaluate_kat_baseline.py# evaluate saved KAT model on PlantDoc test set
 ├── data/
 │   └── processed/
 │       ├── tomato_plantvillage/
@@ -50,7 +53,7 @@ plant_disease_project/
 | EfficientNet Baseline | 0.2943   | 0.2517       | Tamamlandı   |
 | EfficientNet 5-shot   | 0.3763   | 0.3770       | Tamamlandı   |
 | EfficientNet 10-shot  | 0.3880   | 0.3989       | Tamamlandı   |
-| KAT Baseline          | —        | —            | Sırada       |
+| KAT Baseline          | 0.2341   | 0.2173       | Tamamlandı   |
 | KAT 5-shot            | —        | —            | Sırada       |
 | KAT 10-shot           | —        | —            | Sırada       |
 
@@ -95,9 +98,9 @@ Smoke-test sonucu (8 Mayıs 2026):
 
 Öncelik sırasıyla:
 
-1. `src/train_kat.py` — KATModel'i PlantVillage üzerinde eğit, modeli kaydet
-2. `src/fewshot_kat.py` — sadece agent_queries'i fine-tune et, backbone donuk kalır
-3. `src/evaluate_kat.py` — KAT sonuçlarını baseline tablosuyla karşılaştır
+1. `src/fewshot_kat.py` — sadece agent_queries'i fine-tune et, backbone donuk kalır
+2. `src/evaluate_kat.py` — KAT sonuçlarını baseline tablosuyla karşılaştır (genel değerlendirme)
+3. KAT prototipleri iyileştirme ve MMD aşamaları (deneysel)
 
 ---
 
@@ -123,11 +126,13 @@ Büyük fikirlere atlamak yok. Her adımı birlikte değerlendiriyoruz. Saçmala
 
 | Tarih       | Commit                              | Açıklama                                        |
 |-------------|-------------------------------------|-------------------------------------------------|
-| 8 Mayıs     | init                                | Temiz proje kurulumu                            |
-| 8 Mayıs     | fix: freeze_backbone                | Classifier açık kalacak şekilde düzeltildi      |
-| 8 Mayıs     | fix: compute_class_weights          | Sıfır bölme koruması eklendi                    |
-| 8 Mayıs     | fix: fewshot_finetune validation    | Train/val split, early stopping val loss'a göre |
-| 8 Mayıs     | feat: add KATModel                  | Prototype attention + MLP, smoke-test geçti     |
+| 9 Mayıs     | init                                | Temiz proje kurulumu                            |
+| 9 Mayıs     | fix: freeze_backbone                | Classifier açık kalacak şekilde düzeltildi      |
+| 9 Mayıs     | fix: compute_class_weights          | Sıfır bölme koruması eklendi                    |
+| 9 Mayıs     | fix: fewshot_finetune validation    | Train/val split, early stopping val loss'a göre |
+| 9 Mayıs     | feat: add KATModel                  | Prototype attention + MLP, smoke-test geçti     |
+| 9 Mayıs     | feat: add train_kat.py              | KAT eğitim pipeline                              |
+| 9 Mayıs     | exp: evaluate KAT baseline          | PlantDoc acc 0.2341 balanced 0.2173              |
 
 ---
 
