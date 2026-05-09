@@ -9,7 +9,14 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, confusion_matrix
 
-from dataset import get_plantdoc_loaders
+from dataset import (
+    get_plantdoc_loaders,
+    load_plantdoc_samples,
+    split_plantdoc,
+    LeafDataset,
+    get_train_transform,
+    get_val_transform,
+)
 import config
 from model_kat import KATModel
 import numpy as np
@@ -164,6 +171,68 @@ def evaluate_and_save(model: KATModel, test_loader: DataLoader, device, out_pref
     fig_path.mkdir(parents=True, exist_ok=True)
     fig.savefig(fig_path / f"{out_prefix}_confusion_matrix.png")
     plt.close(fig)
+
+
+def finetune_full(device=None):
+    """Fine-tune KATModel on the entire PlantDoc finetune pool (no few-shot cap).
+
+    Uses split_plantdoc() to obtain the finetune pool, then splits it 80/20
+    train/val. Only agent_queries and classifier are trainable (backbone frozen).
+    Prototype init is applied if models/kat_prototype_init.pt exists.
+    Saves best checkpoint to models/kat_plantdoc_full_best.pth and writes
+    evaluation metrics with prefix 'plantdoc_full_kat'.
+    """
+    if device is None:
+        device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+
+    torch.manual_seed(config.SEED)
+
+    # Build full finetune pool (no n_shot cap)
+    all_samples = load_plantdoc_samples(config.PLANTDOC_DIR)
+    finetune_pool, test_samples = split_plantdoc(all_samples, seed=config.SEED)
+    print(f"Finetune pool size: {len(finetune_pool)} | Test size: {len(test_samples)}")
+
+    finetune_dataset = LeafDataset(finetune_pool, transform=get_train_transform())
+    test_dataset     = LeafDataset(test_samples,  transform=get_val_transform())
+
+    full_loader  = DataLoader(finetune_dataset, batch_size=config.BATCH_SIZE,
+                              shuffle=True, num_workers=config.NUM_WORKERS)
+    test_loader  = DataLoader(test_dataset,    batch_size=config.BATCH_SIZE,
+                              shuffle=False, num_workers=config.NUM_WORKERS)
+
+    train_loader, val_loader = split_finetune_loader(full_loader, seed=config.SEED, val_frac=0.2)
+
+    # Load pretrained KAT checkpoint
+    ckpt_path = Path('models/kat_plantvillage_best.pth')
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Pretrained checkpoint not found at {ckpt_path}. Run src/train_kat.py first.")
+
+    model = KATModel(num_classes=config.NUM_CLASSES,
+                     agent_dim=config.KAT_AGENT_DIM,
+                     num_agents=config.KAT_NUM_AGENTS)
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    model.to(device)
+
+    # Prototype init
+    proto_path = Path('models/kat_prototype_init.pt')
+    if proto_path.exists():
+        proto = torch.load(proto_path, map_location=device)
+        model.agent_queries.data.copy_(proto['agent_queries'].to(device))
+        print(f"Prototype init loaded: {proto_path}")
+    else:
+        print(f"WARNING: {proto_path} not found — using random agent_queries init")
+
+    set_requires_grad_for_kat(model)
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in model.parameters())
+    print(f"Trainable params: {trainable} / {total}")
+
+    save_path = 'models/kat_plantdoc_full_best.pth'
+    train_fewshot(model, train_loader, val_loader, device, save_path)
+
+    model.load_state_dict(torch.load(save_path, map_location=device))
+    evaluate_and_save(model, test_loader, device, out_prefix='plantdoc_full_kat')
 
 
 def main():
