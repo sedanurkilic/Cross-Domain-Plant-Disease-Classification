@@ -184,6 +184,14 @@ def main():
         model.load_state_dict(state)
         model.to(device)
 
+        proto_path = Path('models/kat_prototype_init.pt')
+        if proto_path.exists():
+            proto = torch.load(proto_path, map_location=device)
+            model.agent_queries.data.copy_(proto['agent_queries'].to(device))
+            print(f"Prototype init loaded: {proto_path}")
+        else:
+            print(f"WARNING: {proto_path} not found — using random agent_queries init")
+
         set_requires_grad_for_kat(model)
 
         # debug: list trainable params
