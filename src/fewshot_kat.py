@@ -74,10 +74,11 @@ def set_requires_grad_for_kat(model: KATModel):
         p.requires_grad = True
 
 
-def train_fewshot(model: KATModel, train_loader: DataLoader, val_loader: DataLoader, device, save_path: str):
+def train_fewshot(model: KATModel, train_loader: DataLoader, val_loader: DataLoader, device, save_path: str, optimizer=None):
     criterion = nn.CrossEntropyLoss(weight=compute_class_weights_from_loader(train_loader).to(device))
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params, lr=config.FINETUNE_LR, weight_decay=1e-5)
+    if optimizer is None:
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.Adam(trainable_params, lr=config.FINETUNE_LR, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
 
     best_val_loss = float('inf')
@@ -222,14 +223,34 @@ def finetune_full(device=None):
     else:
         print(f"WARNING: {proto_path} not found — using random agent_queries init")
 
-    set_requires_grad_for_kat(model)
+    # Freeze all, then selectively unfreeze
+    for p in model.parameters():
+        p.requires_grad = False
+    model.agent_queries.requires_grad = True
+    for p in model.classifier.parameters():
+        p.requires_grad = True
+    for name, param in model.named_parameters():
+        if any(k in name for k in ("blocks.6", "conv_head")):
+            param.requires_grad = True
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total     = sum(p.numel() for p in model.parameters())
     print(f"Trainable params: {trainable} / {total}")
 
+    backbone_params = [p for n, p in model.named_parameters()
+                       if p.requires_grad and any(k in n for k in ("blocks.6", "conv_head"))]
+    head_params     = [p for n, p in model.named_parameters()
+                       if p.requires_grad and not any(k in n for k in ("blocks.6", "conv_head"))]
+    print(f"  backbone group (lr=1e-5): {sum(p.numel() for p in backbone_params)} params")
+    print(f"  head group     (lr=1e-4): {sum(p.numel() for p in head_params)} params")
+
+    optimizer = torch.optim.Adam([
+        {'params': backbone_params, 'lr': 1e-5},
+        {'params': head_params,     'lr': 1e-4},
+    ], weight_decay=1e-5)
+
     save_path = 'models/kat_plantdoc_full_best.pth'
-    train_fewshot(model, train_loader, val_loader, device, save_path)
+    train_fewshot(model, train_loader, val_loader, device, save_path, optimizer=optimizer)
 
     model.load_state_dict(torch.load(save_path, map_location=device))
     evaluate_and_save(model, test_loader, device, out_prefix='plantdoc_full_kat')
