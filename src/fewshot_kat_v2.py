@@ -59,7 +59,7 @@ def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(trainable_params, lr=config.FINETUNE_LR, weight_decay=1e-5)
 
-    for epoch in range(1, 51):
+    for epoch in range(1, 61):
         model.train()
         train_losses = []
         for imgs, labels in train_loader:
@@ -79,7 +79,7 @@ def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path
             train_losses.append(loss.item())
 
         avg_train_loss = sum(train_losses) / max(1, len(train_losses))
-        print(f"Epoch {epoch}/50 — train_loss={avg_train_loss:.4f}")
+        print(f"Epoch {epoch}/60 — train_loss={avg_train_loss:.4f}")
         torch.save(model.state_dict(), save_path)
 
         if test_loader is not None and epoch % eval_every == 0:
@@ -94,6 +94,155 @@ def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path
             acc = accuracy_score(all_targets, all_preds)
             bal = balanced_accuracy_score(all_targets, all_preds)
             print(f"  → Epoch {epoch} test:  accuracy={acc:.4f}  balanced_accuracy={bal:.4f}")
+
+
+def train_one_fold(model: KATModelV2, train_loader: DataLoader, val_loader: DataLoader,
+                   device, num_epochs: int = 60):
+    """Train for one CV fold; return per-epoch val metrics without touching test set."""
+    criterion = nn.CrossEntropyLoss(
+        weight=compute_class_weights_from_loader(train_loader).to(device)
+    )
+
+    backbone_params = [p for n, p in model.named_parameters()
+                       if p.requires_grad and ('blocks.6' in n or 'conv_head' in n)]
+    head_params     = [p for n, p in model.named_parameters()
+                       if p.requires_grad and 'blocks.6' not in n and 'conv_head' not in n]
+    optimizer = torch.optim.Adam([
+        {'params': backbone_params, 'lr': 1e-5},
+        {'params': head_params,     'lr': 1e-4},
+    ], weight_decay=1e-5)
+
+    val_metrics = []  # [(epoch, acc, balanced_acc), ...]
+
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        train_losses = []
+        for imgs, labels in train_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            logits, agent_out = model(imgs)
+            ce_loss  = criterion(logits, labels)
+            agent_n  = F.normalize(agent_out, dim=-1)
+            sim      = torch.bmm(agent_n, agent_n.transpose(1, 2))
+            eye_mask = torch.eye(sim.shape[1], device=sim.device).bool().unsqueeze(0)
+            sim      = sim.masked_fill(eye_mask, 0.0)
+            div_loss = sim.sum() / (agent_out.shape[0] * sim.shape[1] * (sim.shape[1] - 1))
+            loss     = ce_loss + 0.01 * div_loss
+            loss.backward()
+            optimizer.step()
+            train_losses.append(loss.item())
+
+        avg_loss = sum(train_losses) / max(1, len(train_losses))
+
+        model.eval()
+        all_preds, all_targets = [], []
+        with torch.no_grad():
+            for imgs, labels in val_loader:
+                logits, _ = model(imgs.to(device))
+                all_preds.extend(logits.argmax(1).cpu().numpy().tolist())
+                all_targets.extend(labels.numpy().tolist())
+        acc = accuracy_score(all_targets, all_preds)
+        bal = balanced_accuracy_score(all_targets, all_preds)
+        print(f"  ep {epoch:02d}/{num_epochs} loss={avg_loss:.4f} val_acc={acc:.4f} val_bal={bal:.4f}")
+        val_metrics.append((epoch, acc, bal))
+
+    return val_metrics
+
+
+def run_cv(device=None, n_folds: int = 5, num_epochs: int = 60):
+    """5-fold stratified CV on finetune pool — returns best epoch by avg val balanced_acc.
+
+    Test set is never opened during CV.
+    Results saved to results/metrics/cv_results.json.
+    """
+    from sklearn.model_selection import StratifiedKFold
+
+    if device is None:
+        device = torch.device('mps') if torch.backends.mps.is_available() \
+                 else torch.device('cpu')
+
+    torch.manual_seed(config.SEED)
+    np.random.seed(config.SEED)
+
+    all_samples   = load_plantdoc_samples(config.PLANTDOC_DIR)
+    finetune_pool, test_samples = split_plantdoc(all_samples, seed=config.SEED)
+    print(f"Finetune pool: {len(finetune_pool)} | Test (never touched): {len(test_samples)}")
+
+    ckpt_path = Path('models/kat_v2_plantvillage_best.pth')
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Pretrained checkpoint not found: {ckpt_path}")
+
+    labels_arr = [s[1] for s in finetune_pool]
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=config.SEED)
+
+    fold_metrics = []
+
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(finetune_pool, labels_arr)):
+        print(f"\n=== Fold {fold_idx + 1}/{n_folds} "
+              f"(train={len(train_idx)}, val={len(val_idx)}) ===")
+
+        train_samples = [finetune_pool[i] for i in train_idx]
+        val_samples   = [finetune_pool[i] for i in val_idx]
+
+        train_loader = DataLoader(
+            LeafDataset(train_samples, transform=get_train_transform()),
+            batch_size=config.BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS
+        )
+        val_loader = DataLoader(
+            LeafDataset(val_samples, transform=get_val_transform()),
+            batch_size=config.BATCH_SIZE, shuffle=False, num_workers=config.NUM_WORKERS
+        )
+
+        model = KATModelV2(num_classes=config.NUM_CLASSES, agent_dim=config.KAT_AGENT_DIM)
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        model.to(device)
+
+        for p in model.parameters():
+            p.requires_grad = False
+        model.agent_queries.requires_grad = True
+        for p in model.out_proj.parameters():
+            p.requires_grad = True
+        for p in model.classifier.parameters():
+            p.requires_grad = True
+        for name, param in model.named_parameters():
+            if 'blocks.6' in name or 'conv_head' in name:
+                param.requires_grad = True
+
+        metrics = train_one_fold(model, train_loader, val_loader, device,
+                                 num_epochs=num_epochs)
+        fold_metrics.append(metrics)
+
+    avg_bal = np.zeros(num_epochs)
+    for fm in fold_metrics:
+        for (epoch, acc, bal) in fm:
+            avg_bal[epoch - 1] += bal
+    avg_bal /= n_folds
+
+    best_epoch   = int(np.argmax(avg_bal)) + 1
+    best_avg_bal = float(avg_bal[best_epoch - 1])
+
+    print(f"\n=== CV Summary ===")
+    print(f"Best epoch by avg val balanced_acc: {best_epoch}")
+    print(f"Avg val balanced_acc at best epoch: {best_avg_bal:.4f}")
+    print("\nTop-5 epochs:")
+    for ep in np.argsort(avg_bal)[::-1][:5]:
+        print(f"  epoch {ep + 1:02d}: {avg_bal[ep]:.4f}")
+
+    results_path = Path('results/metrics')
+    results_path.mkdir(parents=True, exist_ok=True)
+    cv_out = {
+        'n_folds': n_folds,
+        'num_epochs': num_epochs,
+        'best_epoch': best_epoch,
+        'best_avg_balanced_acc': best_avg_bal,
+        'avg_balanced_acc_per_epoch': avg_bal.tolist(),
+        'fold_metrics': [[(e, a, b) for e, a, b in fm] for fm in fold_metrics],
+    }
+    out_path = results_path / 'cv_results.json'
+    with open(out_path, 'w') as f:
+        json.dump(cv_out, f, indent=2)
+    print(f"\nCV results saved → {out_path}")
+    return best_epoch
 
 
 def evaluate_and_save(model: KATModelV2, test_loader: DataLoader, device, out_prefix: str):
@@ -132,10 +281,8 @@ def evaluate_and_save(model: KATModelV2, test_loader: DataLoader, device, out_pr
 def finetune_full(device=None):
     """Fine-tune KATModelV2 on the entire PlantDoc finetune pool (no few-shot cap).
 
-    Differential lr: backbone blocks.4 at 1e-5, head (agent_queries + out_proj +
-    classifier) at 1e-4. blocks.4 is the hook extraction point in KATv2, so it is
-    the only backbone stage whose gradients flow through the loss.
-    Prototype init applied if models/kat_v2_prototype_init.pt exists.
+    Differential lr: backbone blocks.6 + conv_head at 1e-5, head (agent_queries +
+    out_proj + classifier) at 1e-4.
     """
     if device is None:
         device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
@@ -163,7 +310,7 @@ def finetune_full(device=None):
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model.to(device)
 
-    # Freeze all, then unfreeze blocks.4 (extraction point) + head
+    # Freeze all, then unfreeze blocks.6 + conv_head (deeper backbone) + head
     for p in model.parameters():
         p.requires_grad = False
     model.agent_queries.requires_grad = True
@@ -172,7 +319,7 @@ def finetune_full(device=None):
     for p in model.classifier.parameters():
         p.requires_grad = True
     for name, param in model.named_parameters():
-        if 'blocks.4' in name:
+        if 'blocks.6' in name or 'conv_head' in name:
             param.requires_grad = True
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -180,9 +327,9 @@ def finetune_full(device=None):
     print(f"Trainable params: {trainable} / {total}")
 
     backbone_params = [p for n, p in model.named_parameters()
-                       if p.requires_grad and 'blocks.4' in n]
+                       if p.requires_grad and ('blocks.6' in n or 'conv_head' in n)]
     head_params     = [p for n, p in model.named_parameters()
-                       if p.requires_grad and 'blocks.4' not in n]
+                       if p.requires_grad and 'blocks.6' not in n and 'conv_head' not in n]
     print(f"  backbone group (lr=1e-5): {sum(p.numel() for p in backbone_params)} params")
     print(f"  head group     (lr=1e-4): {sum(p.numel() for p in head_params)} params")
 
