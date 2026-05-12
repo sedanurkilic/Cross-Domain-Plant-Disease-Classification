@@ -1,6 +1,6 @@
 # CLAUDE.md — Cross-Domain Plant Disease Classification
 
-**Son güncelleme:** 10 Mayıs 2026
+**Son güncelleme:** 13 Mayıs 2026
 
 ---
 
@@ -8,7 +8,9 @@
 
 Bu proje, domates yaprak hastalıklarını kontrollü laboratuvar ortamından (PlantVillage) saha fotoğraflarına (PlantDoc) taşıma problemini ele alıyor. Temel zorluk şu: lab ortamında %99'un üzerinde doğrulukla çalışan bir model, saha koşullarında dramatik biçimde başarısız oluyor. Bunu domain gap problemi olarak adlandırıyoruz.
 
-KATv1 deneyleri tamamlandı; EfficientNet few-shot'ın gerisinde kaldı. KATv2 (16 agent, 4-head attention, 14×14 feature map) ile val split kaldırılıp sabit epoch eğitimine geçildi. Diversity loss (lambda=0.01, cosine sim cezası) eklenerek epoch 60'ta **acc 0.4565 / balanced 0.4510** elde edildi. Sıradaki: 5-fold cross-validation + AdaBN.
+KATv1 deneyleri tamamlandı; EfficientNet few-shot'ın gerisinde kaldı. KATv2 (16 agent, 4-head attention, 14×14 feature map) ile val split kaldırılıp sabit epoch eğitimine geçildi. Diversity loss (lambda=0.01) ile epoch 60'ta **acc 0.4565 / balanced 0.4510** elde edildi — ancak bu sonuç test setine bakılarak seçildiği için leaky.
+
+5-fold CV uygulandı: metodolojik olarak temiz best epoch **32**, CV avg val balanced_acc **0.3729**. Epoch 32 ile yeniden eğitilen modelin gerçek test performansı: acc 0.3595 / balanced 0.3545. AdaBN, blocks.6 + conv_head açık olduğunda işe yaramadı — BN stats eğitim sırasında zaten adapte oluyor. Sıradaki: bacterial_spot ve mosaic_virus sınıflarına odaklı strateji.
 
 ---
 
@@ -34,7 +36,9 @@ plant_disease_project/
 │   ├── init_kat_prototypes.py     # KATv1 PlantDoc class prototype vektörleri
 │   ├── init_kat_v2_prototypes.py  # KATv2 PlantDoc class prototype vektörleri
 │   ├── run_finetune_full.py       # KATv1 finetune_full() çağırır
-│   ├── run_finetune_full_v2.py    # KATv2 finetune_full() çağırır
+│   ├── run_finetune_full_v2.py    # KATv2 finetune_full(num_epochs=32) çağırır
+│   ├── run_cv_v2.py               # KATv2 5-fold CV — best epoch seçimi
+│   ├── run_adabn_v2.py            # AdaBN değerlendirmesi (checkpoint argümanı alır)
 │   └── visualize_kat_attention.py # Agent attention haritası görselleştirme
 ├── data/
 │   └── processed/
@@ -66,19 +70,41 @@ plant_disease_project/
 | KATv2 Full + div loss — ep30 | 0.3946   | 0.3898       | Tamamlandı |
 | KATv2 Full + div loss — ep40 | 0.4130   | 0.4074       | Tamamlandı |
 | KATv2 Full + div loss — ep50 | 0.4247   | 0.4302       | Tamamlandı |
-| **KATv2 Full + div loss — ep60** | **0.4565** | **0.4510** | Tamamlandı |
+| KATv2 Full + div loss — ep60 (leaky) | 0.4565 | 0.4510 | Tamamlandı — leaky |
+| **KATv2 ep32 — CV-temiz (blocks.6+conv_head)** | **0.3595** | **0.3545** | Tamamlandı |
+| KATv2 ep32 + AdaBN           | 0.3512   | 0.3399       | Tamamlandı — AdaBN zararlı |
+| KATv2 ep60 + AdaBN           | 0.4197   | 0.4158       | Tamamlandı — AdaBN zararlı |
 
 Hedef: balanced accuracy > 0.60
 
-**Önemli:** KATv2 epoch 40'ta EfficientNet 10-shot'ı (0.3880 / 0.3989) accuracy'de geçti. Epoch 60'ta balanced accuracy 0.4510'a ulaştı; train_loss=1.2945, trend hâlâ iniyor.
+**Metodoloji notu:** ep60 sonucu (0.4510) test setine bakılarak epoch seçildiği için leaky. CV ile elde edilen ep32 sonucu (0.3545) metodolojik olarak temiz; bu gerçek genelleme tahminidir.
 
-Val split kaldırıldı — tüm 146 finetune örneği direkt train'e veriliyor, sabit epoch sayısı kullanılıyor.
+Val split kaldırıldı — tüm 146 finetune örneği direkt train'e veriliyor. `run_finetune_full_v2.py` şu an `num_epochs=32` ile çalışıyor.
 
-### ⚠️ Metodoloji Uyarısı
+### 5-Fold CV Sonuçları (13 Mayıs 2026)
 
-**Şu an test setine bakarak epoch seçiyoruz — bu data leakage'dır.** Her 10 epoch'ta test sonucuna bakıp "daha fazla eğitelim" kararı vermek, modeli dolaylı olarak test setine göre seçmek anlamına gelir. Bu durum, raporlanan metriklerin gerçek genelleme performansından iyimser olmasına yol açar.
+146 finetune örneği, 5-fold stratified CV. Her fold ~117 train / ~29 val.
 
-Doğru yaklaşım: test setine hiç bakmadan epoch sayısına karar vermek. Bunu yapmanın tek güvenilir yolu 5-fold cross-validation — fold'ların ortalaması erken durma / epoch seçimi için kullanılır, test seti yalnızca final değerlendirmede açılır.
+| Fold | val_acc | val_balanced_acc |
+|------|---------|-----------------|
+| 1    | 0.3000  | 0.2812          |
+| 2    | 0.3448  | 0.3708          |
+| 3    | 0.4828  | 0.5104          |
+| 4    | 0.3103  | 0.2708          |
+| 5    | 0.2759  | 0.2500          |
+
+**Best epoch: 32** (avg val balanced_acc = 0.3729)
+
+Fold'lar arası varyans yüksek (0.25–0.51). Fold başına yalnızca ~29 val örneği düşüyor — bu ölçüm gürültüsü yaratıyor. CV fold varyansı, 146 örneklik finetune pool'unun epoch seçimi için çok küçük olduğunu gösteriyor.
+
+### AdaBN Analizi
+
+| Checkpoint | Baseline | + AdaBN | Fark |
+|---|---|---|---|
+| ep32 | 0.3545 | 0.3399 | −0.015 |
+| ep60 | 0.4510 | 0.4158 | −0.035 |
+
+**Sonuç:** AdaBN her ikisinde de performansı düşürdü. **Sebebi:** blocks.6 + conv_head trainable olduğu için BN istatistikleri eğitim sırasında PlantDoc'a zaten adapte oldu. Inference'ta tekrar güncellemek mevcut adaptasyonu bozuyor. AdaBN yalnızca tamamen dondurulmuş backbone'larda etkili — bu konfigürasyonda geçerli değil.
 
 ---
 
@@ -100,7 +126,7 @@ EfficientNet-B0 (dondurulmuş backbone)
 ## KATv2 Mimarisi (model_kat_v2.py)
 
 ```
-EfficientNet-B0 (backbone — blocks.4 kısmen açık, geri kalan donuk)
+EfficientNet-B0 (backbone — blocks.6 + conv_head açık, geri kalan donuk)
     → forward hook on blocks[4] → (B, 112, 14, 14)
     → 1x1 Conv projection → (B, 256, 14, 14)
     → spatial flatten → (B, 196, 256)
@@ -112,9 +138,9 @@ EfficientNet-B0 (backbone — blocks.4 kısmen açık, geri kalan donuk)
 
 finetune_full() eğitim stratejisi:
 - Tüm 146 finetune örneği train'e verilir (val split yok)
-- Sabit epoch sayısı, her epoch sonunda checkpoint kaydedilir
-- Differential lr: backbone blocks.4 → 1e-5, head → 1e-4
-- Her 10 epoch'ta test set üzerinde ara değerlendirme yapılır
+- `num_epochs` parametresi — şu an 32 (CV'den seçildi)
+- Differential lr: backbone blocks.6 + conv_head → 1e-5, head → 1e-4
+- Checkpoint: `models/kat_v2_plantdoc_ep{num_epochs}_best.pth`
 
 ---
 
@@ -129,29 +155,47 @@ finetune_full() eğitim stratejisi:
 - Val split kaldırınca ve sabit epoch eğitimine geçince performans tutarlı biçimde arttı.
 - Prototype tiling (8→16) eğitimi bozdu — epoch 1'de loss patladı, kullanılmıyor.
 - Diversity loss (lambda=0.01) epoch 50'de balanced acc'ı 0.4290'a taşıdı (önceki best: 0.4025 @ epoch 40).
-- Epoch 60'ta acc 0.4565 / balanced 0.4510; train_loss=1.2945 — loss hâlâ iniyor, plateau yok.
-- **Metodoloji sorunu:** test setine bakarak epoch seçildi → 5-fold CV ile düzeltilmeli.
+- Epoch 60'ta acc 0.4565 / balanced 0.4510 — leaky (test setine bakılarak seçildi).
+- **5-fold CV (13 Mayıs):** best epoch = 32, temiz test sonucu acc 0.3595 / balanced 0.3545. Leakage'ın etkisi: +0.097 balanced acc şişme.
+- **AdaBN (13 Mayıs):** blocks.6 + conv_head açık olduğunda zararlı. BN stats eğitimde zaten adapte oluyor, inference'ta tekrar güncelleme bozuyor.
+- freeze stratejisi: blocks.4 → blocks.6 + conv_head olarak değiştirildi (13 Mayıs).
+
+---
+
+## Sınıf Bazlı Analiz (ep60 checkpoint, 598 test örneği)
+
+| Sınıf | n | Precision | Recall | F1 | Durum |
+|---|---|---|---|---|---|
+| bacterial_spot | 88 | 0.308 | 0.136 | **0.189** | En kötü |
+| early_blight | 71 | 0.389 | 0.521 | 0.446 | Orta |
+| healthy | 51 | 0.368 | 0.490 | 0.420 | Orta |
+| late_blight | 89 | 0.586 | 0.730 | **0.650** | En iyi |
+| mold | 73 | 0.500 | 0.219 | 0.305 | Kötü — recall düşük |
+| mosaic_virus | 44 | 0.255 | 0.318 | 0.283 | Kötü — az veri |
+| yellow_virus | 61 | 0.586 | 0.672 | 0.626 | İyi |
+| septoria_leaf_spot | 121 | 0.492 | 0.521 | 0.506 | Orta |
+
+**Bulgular:**
+- **late_blight (F1=0.650) ve yellow_virus (F1=0.626):** Görsel olarak ayırt edici semptomlar saha fotoğraflarında da korunuyor.
+- **bacterial_spot (F1=0.189):** n=88 ile büyük sınıf ama recall=0.14 — örneklerin %86'sı yanlış etiketleniyor. Septoria ile görsel karışıklık muhtemel (her ikisi de küçük koyu leke).
+- **mold (F1=0.305):** Precision=0.50 yüksek ama recall=0.22 çok düşük — model mold'u tanıdığında haklı ama çoğunu kaçırıyor. Dominant sınıflara (septoria, late_blight) akıyor olabilir.
+- **mosaic_virus (F1=0.283):** En az örnekli sınıf (n=44) — finetune pool'da yetersiz görüldü.
 
 ---
 
 ## Sıradaki Adımlar
 
-### a) 5-Fold Cross-Validation
+### a) bacterial_spot ve mosaic_virus'a Odaklı Strateji
 
-146 finetune örneğini 5 fold'a böl. Her fold için: 4 fold'u train'e ver, 1 fold'u val'e ayır, sabit epoch sayısıyla eğit, val metriğini kaydet. 5 fold ortalaması epoch sayısı kararı için kullanılır — test seti bu aşamada hiç açılmaz. Sonra seçilen epoch sayısıyla tüm 146 örnek üzerinde yeniden eğit, yalnızca o zaman test setini aç.
+Bu iki sınıf toplam F1 ortalamasını en çok aşağı çekiyor. Seçenekler:
 
-### b) AdaBN (Adaptive Batch Normalization)
+**1. Sınıf bazlı augmentation:** bacterial_spot ve mosaic_virus için finetune pool'da daha agresif augmentation (daha fazla crop çeşitliliği, renk bozulması). Diğer sınıflar değişmez.
 
-Inference-time domain adaptation — eğitim kodu değişmez, sadece değerlendirme adımına eklenir.
+**2. Finetune split değiştirme:** Şu an %20 finetune / %80 test. bacterial_spot ve mosaic_virus için bu oran dezavantajlı — finetune pool'da 88×0.2=~18 bacterial_spot örneği var. Split'i %30/%70 yaparak bu sınıflara daha fazla örnek vermek denenebilir. Ancak test set küçülür.
 
-**Nasıl çalışır:**
-1. Model checkpoint yüklendikten sonra `model.train()` moduna al.
-2. PlantDoc finetune görüntüleriyle (veya test görüntüleriyle) birkaç forward pass yap — gradient hesaplanmaz (`torch.no_grad()`), sadece BN running stats (running_mean, running_var) güncellenir.
-3. `model.eval()` moduna geç, test setini değerlendir.
+**3. Weighted sampling:** Finetune loader'da az örnekli sınıflara daha yüksek örnekleme ağırlığı ver (WeightedRandomSampler). Mevcut class weight'ler loss'ta var ama sampler'da yok.
 
-**Amaç:** Backbone'daki BN katmanları PlantVillage istatistikleriyle dolu; PlantDoc görüntülerini göstererek bu istatistikleri saha dağılımına yakınsatmak.
-
-**Not:** KATv2'de backbone büyük ölçüde dondurulmuş olsa da blocks[4] açık — o bloktaki BN istatistikleri güncellenecek.
+**Önemli:** Her deneme `run_cv_v2.py` ile CV'den geçmeli — test seti epoch seçiminde açılmayacak.
 
 ---
 
@@ -159,10 +203,9 @@ Inference-time domain adaptation — eğitim kodu değişmez, sadece değerlendi
 
 `visualize_kat_attention.py` ile PlantDoc test setindeki örneklerin agent attention haritaları incelendi:
 
-- Class 7 (Septoria) ve Class 3 (Late Blight) en iyi sonuç — agent'lar hastalık bölgelerine net odaklanıyor.
-- Class 4 (Leaf Miner) veri kalitesi sorunu — watermark mevcut, model watermark'ı öğreniyor.
-- Class 1 ve 6'da birden fazla yaprak aynı karede; agent'lar hangi yaprağa bakacağını seçemiyor.
-- Class 2 ve 5'te backbone PlantVillage'e kilitli; agent'lar arka plana odaklanıyor.
+- septoria_leaf_spot (7) ve late_blight (3): agent'lar hastalık bölgelerine net odaklanıyor — F1 sonuçlarıyla örtüşüyor.
+- mold (4): birden fazla yaprak aynı karede; agent'lar hangi yaprağa bakacağını seçemiyor.
+- bacterial_spot (0) ve mosaic_virus (5): backbone PlantVillage'e kilitli kaldığından agent'lar arka plana odaklanıyor.
 
 ---
 
@@ -205,6 +248,11 @@ Büyük fikirlere atlamak yok. Her adımı birlikte değerlendiriyoruz. Saçmala
 | 9 Mayıs  | exp: KATv2 full finetune                 | No val split, fixed epochs — acc 0.4130 @ epoch 40   |
 | 10 Mayıs | exp: add diversity loss to KATv2         | Balanced acc 0.4290 @ ep50, 0.4510 @ ep60             |
 | 10 Mayıs | docs: update CLAUDE.md                   | Diversity loss sonuçları, metodoloji uyarısı, CV + AdaBN planı |
+| 13 Mayıs | feat: add train_one_fold() + run_cv()    | 5-fold stratified CV; freeze blocks.4 → blocks.6+conv_head |
+| 13 Mayıs | feat: add run_cv_v2.py                   | CV runner script                                      |
+| 13 Mayıs | feat: add apply_adabn() + evaluate_with_adabn() | num_epochs parametrik; AdaBN fonksiyonları   |
+| 13 Mayıs | feat: add run_adabn_v2.py                | AdaBN runner (checkpoint argümanı alır)               |
+| 13 Mayıs | docs: update CLAUDE.md                   | CV sonuçları, AdaBN analizi, sınıf bazlı breakdown    |
 
 ---
 
