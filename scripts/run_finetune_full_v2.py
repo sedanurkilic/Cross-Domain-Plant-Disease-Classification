@@ -13,4 +13,4 @@ from fewshot_kat_v2 import finetune_full
 
 if __name__ == "__main__":
     device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-    finetune_full(device=device)
+    finetune_full(device=device, num_epochs=32)
