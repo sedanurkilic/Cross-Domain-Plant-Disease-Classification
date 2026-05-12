@@ -53,13 +53,14 @@ def split_finetune_loader(finetune_loader: DataLoader, seed: int = 42, val_frac:
 
 
 def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path: str,
-                  optimizer=None, test_loader: DataLoader = None, eval_every: int = 10):
+                  optimizer=None, test_loader: DataLoader = None, eval_every: int = 10,
+                  num_epochs: int = 60):
     criterion = nn.CrossEntropyLoss(weight=compute_class_weights_from_loader(train_loader).to(device))
     if optimizer is None:
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(trainable_params, lr=config.FINETUNE_LR, weight_decay=1e-5)
 
-    for epoch in range(1, 61):
+    for epoch in range(1, num_epochs + 1):
         model.train()
         train_losses = []
         for imgs, labels in train_loader:
@@ -79,7 +80,7 @@ def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path
             train_losses.append(loss.item())
 
         avg_train_loss = sum(train_losses) / max(1, len(train_losses))
-        print(f"Epoch {epoch}/60 — train_loss={avg_train_loss:.4f}")
+        print(f"Epoch {epoch}/{num_epochs} — train_loss={avg_train_loss:.4f}")
         torch.save(model.state_dict(), save_path)
 
         if test_loader is not None and epoch % eval_every == 0:
@@ -245,6 +246,63 @@ def run_cv(device=None, n_folds: int = 5, num_epochs: int = 60):
     return best_epoch
 
 
+def apply_adabn(model: KATModelV2, finetune_samples: list, device, n_passes: int = 3):
+    """Update BN running stats in backbone using PlantDoc finetune images.
+
+    Runs model.train() so BN layers update their running_mean/running_var,
+    but torch.no_grad() prevents any gradient computation.
+    Returns model in eval() mode ready for inference.
+    """
+    loader = DataLoader(
+        LeafDataset(finetune_samples, transform=get_val_transform()),
+        batch_size=config.BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS
+    )
+    model.train()
+    with torch.no_grad():
+        for pass_idx in range(n_passes):
+            for imgs, _ in loader:
+                model(imgs.to(device))
+            print(f"  AdaBN pass {pass_idx + 1}/{n_passes} done")
+    model.eval()
+    return model
+
+
+def evaluate_with_adabn(device=None, checkpoint_path: str = None,
+                        out_prefix: str = None, n_passes: int = 3):
+    """Load checkpoint, apply AdaBN using finetune pool, evaluate on test set."""
+    if device is None:
+        device = torch.device('mps') if torch.backends.mps.is_available() \
+                 else torch.device('cpu')
+
+    all_samples   = load_plantdoc_samples(config.PLANTDOC_DIR)
+    finetune_pool, test_samples = split_plantdoc(all_samples, seed=config.SEED)
+    print(f"AdaBN pool (finetune): {len(finetune_pool)} | Test: {len(test_samples)}")
+
+    if checkpoint_path is None:
+        checkpoint_path = 'models/kat_v2_plantdoc_ep60_best.pth'
+    ckpt = Path(checkpoint_path)
+    if not ckpt.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
+
+    if out_prefix is None:
+        out_prefix = f'plantdoc_full_kat_v2_{ckpt.stem}_adabn'
+
+    model = KATModelV2(num_classes=config.NUM_CLASSES, agent_dim=config.KAT_AGENT_DIM)
+    model.load_state_dict(torch.load(ckpt, map_location=device))
+    model.to(device)
+    print(f"Checkpoint loaded: {ckpt}")
+
+    print(f"Applying AdaBN ({n_passes} passes over {len(finetune_pool)} finetune images)...")
+    model = apply_adabn(model, finetune_pool, device, n_passes=n_passes)
+
+    test_loader = DataLoader(
+        LeafDataset(test_samples, transform=get_val_transform()),
+        batch_size=config.BATCH_SIZE, shuffle=False, num_workers=config.NUM_WORKERS
+    )
+    evaluate_and_save(model, test_loader, device, out_prefix=out_prefix)
+    print(f"AdaBN evaluation complete → results/metrics/{out_prefix}_metrics.json")
+
+
 def evaluate_and_save(model: KATModelV2, test_loader: DataLoader, device, out_prefix: str):
     model.eval()
     all_preds, all_targets = [], []
@@ -278,11 +336,12 @@ def evaluate_and_save(model: KATModelV2, test_loader: DataLoader, device, out_pr
     plt.close(fig)
 
 
-def finetune_full(device=None):
+def finetune_full(device=None, num_epochs: int = 60):
     """Fine-tune KATModelV2 on the entire PlantDoc finetune pool (no few-shot cap).
 
     Differential lr: backbone blocks.6 + conv_head at 1e-5, head (agent_queries +
     out_proj + classifier) at 1e-4.
+    Checkpoint saved to models/kat_v2_plantdoc_ep{num_epochs}_best.pth.
     """
     if device is None:
         device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
@@ -338,9 +397,11 @@ def finetune_full(device=None):
         {'params': head_params,     'lr': 1e-4},
     ], weight_decay=1e-5)
 
-    save_path = 'models/kat_v2_plantdoc_full_best.pth'
+    save_path = f'models/kat_v2_plantdoc_ep{num_epochs}_best.pth'
     train_fewshot(model, full_loader, device, save_path,
-                  optimizer=optimizer, test_loader=test_loader, eval_every=10)
+                  optimizer=optimizer, test_loader=test_loader, eval_every=10,
+                  num_epochs=num_epochs)
 
     model.load_state_dict(torch.load(save_path, map_location=device))
-    evaluate_and_save(model, test_loader, device, out_prefix='plantdoc_full_kat_v2')
+    evaluate_and_save(model, test_loader, device,
+                      out_prefix=f'plantdoc_full_kat_v2_ep{num_epochs}')
