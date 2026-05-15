@@ -12,7 +12,9 @@ KATv1 deneyleri tamamlandı; EfficientNet few-shot'ın gerisinde kaldı. KATv2 (
 
 5-fold CV uygulandı: metodolojik olarak temiz best epoch **32**, CV avg val balanced_acc **0.3729**. Epoch 32 ile yeniden eğitilen modelin gerçek test performansı: acc 0.3595 / balanced 0.3545. AdaBN, blocks.6 + conv_head açık olduğunda işe yaramadı — BN stats eğitim sırasında zaten adapte oluyor. Sıradaki: bacterial_spot ve mosaic_virus sınıflarına odaklı strateji.
 
-Focal Loss (gamma=2) eklendi: CV ortalaması 0.3729 → 0.4025 iyileşti ancak test'e yansımadı (ep32: acc 0.3462, balanced 0.3545). KATv2 attention map analizi yapıldı — iki hata türü tespit edildi: görsel benzerlik (bacterial_spot↔septoria) ve hastalık evresi farklılığı (early_blight ileri evrede yellow_virus'a benziyor). FieldPlant veri seti ek test seti olarak değerlendiriliyor.
+Focal Loss (gamma=2) eklendi: CV ortalaması 0.3729 → 0.4025 iyileşti ancak test'e yansımadı (ep32: acc 0.3462, balanced 0.3575). KATv2 attention map analizi yapıldı — iki hata türü tespit edildi: görsel benzerlik (bacterial_spot↔septoria) ve hastalık evresi farklılığı (early_blight ileri evrede yellow_virus'a benziyor). FieldPlant veri seti ek test seti olarak değerlendiriliyor.
+
+EfficientNet 5-fold CV tamamlandı (15 Mayıs): best epoch **20**, CV avg val balanced_acc **0.3767**, test acc 0.3729 / balanced **0.3553**. **Temel bulgu: KATv2 ve EfficientNet CV-temiz sonuçları neredeyse özdeş (0.3545 vs 0.3553). Mimari farklılık performansı açıklamıyor — asıl darboğaz 146 görüntülük finetune pool.**
 
 ---
 
@@ -41,6 +43,7 @@ plant_disease_project/
 │   ├── run_finetune_full_v2.py    # KATv2 finetune_full(num_epochs=32) çağırır
 │   ├── run_cv_v2.py               # KATv2 5-fold CV — best epoch seçimi
 │   ├── run_adabn_v2.py            # AdaBN değerlendirmesi (checkpoint argümanı alır)
+│   ├── run_cv_efficientnet.py     # EfficientNet 5-fold CV + full retrain
 │   └── visualize_kat_attention.py # Agent attention haritası görselleştirme
 ├── data/
 │   └── processed/
@@ -75,9 +78,9 @@ plant_disease_project/
 | KATv2 Full + div loss — ep60 (leaky) | 0.4565 | 0.4510 | Tamamlandı — leaky |
 | **KATv2 ep32 — CV-temiz (blocks.6+conv_head)** | **0.3595** | **0.3545** | Tamamlandı |
 | KATv2 ep32 + AdaBN           | 0.3512   | 0.3399       | Tamamlandı — AdaBN zararlı |
-| KATv2 ep32 + AdaBN           | 0.3512   | 0.3399       | Tamamlandı — AdaBN zararlı |
 | KATv2 ep60 + AdaBN           | 0.4197   | 0.4158       | Tamamlandı — AdaBN zararlı |
 | KATv2 + FocalLoss ep32       | 0.3462   | 0.3575       | Tamamlandı — CV iyileşti, test'e yansımadı |
+| **EfficientNet CV-temiz ep20** | **0.3729** | **0.3553** | Tamamlandı — CV best epoch=20 |
 
 Hedef: balanced accuracy > 0.60
 
@@ -114,6 +117,25 @@ Fold'lar arası varyans yüksek (0.25–0.51). Fold başına yalnızca ~29 val �
 **Best epoch: 32** (avg val balanced_acc = 0.4025)
 
 CV ortalaması +0.030 iyileşti (0.3729 → 0.4025). Best epoch yine 32 — tutarlı. Ancak test sonucu minimal değişti (balanced 0.3545 → 0.3575). CV iyileşmesi test'e yansımadı — 146 örneklik finetune pool hâlâ temel darboğaz.
+
+### 5-Fold CV — EfficientNet Karşılaştırması (15 Mayıs 2026)
+
+`run_cv_efficientnet.py`: `plantvillage_best.pth` yükle → `freeze_backbone()` → 146 finetune pool'da 5-fold CV × 60 epoch. CrossEntropyLoss, sabit lr.
+
+**Best epoch: 20** (avg val balanced_acc = 0.3767)
+**Test: acc=0.3729, balanced_accuracy=0.3553**
+
+### Mimari Karşılaştırma — CV-Temiz Sonuçlar
+
+| Model | CV Best Epoch | CV Avg Bal Acc | Test Acc | Test Balanced Acc |
+|---|---|---|---|---|
+| EfficientNet (CrossEntropy) | 20 | 0.3767 | 0.3729 | 0.3553 |
+| KATv2 (CrossEntropy) | 32 | 0.3729 | 0.3595 | 0.3545 |
+| KATv2 (FocalLoss γ=2) | 32 | 0.4025 | 0.3462 | 0.3575 |
+
+**Temel bulgu:** EfficientNet ve KATv2 test performansı CV-temiz koşullarda neredeyse özdeş (~0.354–0.355 balanced). Mimari fark istatistiksel olarak anlamlı değil. KATv2'nin prototype attention mekanizması domain adaptation avantajı sağlamıyor — en azından bu veri miktarında.
+
+**Asıl darboğaz:** 146 görüntülük finetune pool. Loss fonksiyonu, mimari veya regularizasyon değişikliklerinin hiçbiri bu sınırı aşamadı. Bir sonraki anlamlı iyileşme için daha fazla saha verisi gerekiyor.
 
 ### AdaBN Analizi
 
@@ -204,17 +226,19 @@ finetune_full() eğitim stratejisi:
 
 ## Sıradaki Adımlar
 
-### a) bacterial_spot ve mosaic_virus'a Odaklı Strateji
+### a) Temel Darboğaz: Veri Miktarı
 
-Bu iki sınıf toplam F1 ortalamasını en çok aşağı çekiyor. Seçenekler:
+Mimari ve loss fonksiyonu deneyleri sonuca göre: **mevcut 146 görüntülük finetune pool ile ~0.35 balanced accuracy tavanı var.** Bunu aşmak için daha fazla saha verisi şart.
 
-**1. Sınıf bazlı augmentation:** bacterial_spot ve mosaic_virus için finetune pool'da daha agresif augmentation (daha fazla crop çeşitliliği, renk bozulması). Diğer sınıflar değişmez.
+**Seçenekler (öncelik sırasıyla):**
 
-**2. Finetune split değiştirme:** Şu an %20 finetune / %80 test. bacterial_spot ve mosaic_virus için bu oran dezavantajlı — finetune pool'da 88×0.2=~18 bacterial_spot örneği var. Split'i %30/%70 yaparak bu sınıflara daha fazla örnek vermek denenebilir. Ancak test set küçülür.
+**1. Ek saha verisi toplama:** FieldPlant veya başka saha veri setlerinden PlantDoc sınıflarına uyan görüntüleri finetune pool'a eklemek. Bu, diğer tüm yaklaşımların önünde geliyor.
 
-**3. Weighted sampling:** Finetune loader'da az örnekli sınıflara daha yüksek örnekleme ağırlığı ver (WeightedRandomSampler). Mevcut class weight'ler loss'ta var ama sampler'da yok. — Focal Loss ile birlikte kullanılması double-counting riski yaratıyor; önce ayrı denenecek.
+**2. Finetune split değiştirme:** %20→%30 finetune oranı, bacterial_spot ve mosaic_virus için finetune pool'u büyütür. Ancak test set küçülür — değerlendirme güvenilirliği düşer.
 
-**4. FieldPlant veri seti:** Ek test seti olarak değerlendiriliyor — domain gap'in farklı bir saha ortamında nasıl göründüğünü ölçmek için.
+**3. Sınıf bazlı augmentation:** bacterial_spot ve mosaic_virus için daha agresif augmentation. Veri yoksa augmentation çok yardımcı olmaz ama denenebilir.
+
+**Artık denenmeyecekler:** AdaBN (trainable backbone ile zararlı), WeightedRandomSampler+FocalLoss (double-counting), daha derin KAT mimarisi (mimari bottleneck değil).
 
 **Önemli:** Her deneme `run_cv_v2.py` ile CV'den geçmeli — test seti epoch seçiminde açılmayacak.
 
@@ -285,6 +309,8 @@ Büyük fikirlere atlamak yok. Her adımı birlikte değerlendiriyoruz. Saçmala
 | 15 Mayıs | feat: FocalLoss (gamma=2) — train_fewshot + train_one_fold | CV avg 0.3729→0.4025, test 0.3545→0.3575 |
 | 15 Mayıs | feat: update visualize_kat_attention.py for KATv2 | 16 agent, 4×4 grid, head-averaged attn  |
 | 15 Mayıs | docs: update CLAUDE.md                   | Focal Loss + attention analizi, oturum sonu 15 Mayıs  |
+| 15 Mayıs | feat: add run_cv_efficientnet.py          | EfficientNet 5-fold CV + full retrain; best ep=20, balanced=0.3553 |
+| 15 Mayıs | docs: update CLAUDE.md                   | EfficientNet CV sonuçları, mimari karşılaştırma, veri darboğazı tespiti |
 
 ---
 
