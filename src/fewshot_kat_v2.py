@@ -22,6 +22,19 @@ from model_kat_v2 import KATModelV2
 import numpy as np
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, weight=None, gamma=2.0):
+        super().__init__()
+        self.weight = weight
+        self.gamma  = gamma
+
+    def forward(self, logits, targets):
+        ce     = F.cross_entropy(logits, targets, weight=self.weight, reduction='none')
+        pt     = torch.exp(-ce)
+        focal  = (1 - pt) ** self.gamma * ce
+        return focal.mean()
+
+
 def compute_class_weights_from_loader(loader):
     class_counts = np.zeros(config.NUM_CLASSES, dtype=np.float64)
     for _, label in loader:
@@ -55,7 +68,7 @@ def split_finetune_loader(finetune_loader: DataLoader, seed: int = 42, val_frac:
 def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path: str,
                   optimizer=None, test_loader: DataLoader = None, eval_every: int = 10,
                   num_epochs: int = 60):
-    criterion = nn.CrossEntropyLoss(weight=compute_class_weights_from_loader(train_loader).to(device))
+    criterion = FocalLoss(weight=compute_class_weights_from_loader(train_loader).to(device), gamma=2.0)
     if optimizer is None:
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(trainable_params, lr=config.FINETUNE_LR, weight_decay=1e-5)
@@ -100,8 +113,8 @@ def train_fewshot(model: KATModelV2, train_loader: DataLoader, device, save_path
 def train_one_fold(model: KATModelV2, train_loader: DataLoader, val_loader: DataLoader,
                    device, num_epochs: int = 60):
     """Train for one CV fold; return per-epoch val metrics without touching test set."""
-    criterion = nn.CrossEntropyLoss(
-        weight=compute_class_weights_from_loader(train_loader).to(device)
+    criterion = FocalLoss(
+        weight=compute_class_weights_from_loader(train_loader).to(device), gamma=2.0
     )
 
     backbone_params = [p for n, p in model.named_parameters()
