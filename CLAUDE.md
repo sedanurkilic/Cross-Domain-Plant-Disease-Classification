@@ -1,6 +1,6 @@
 # CLAUDE.md — Cross-Domain Plant Disease Classification
 
-**Son güncelleme:** 13 Mayıs 2026
+**Son güncelleme:** 15 Mayıs 2026
 
 ---
 
@@ -11,6 +11,8 @@ Bu proje, domates yaprak hastalıklarını kontrollü laboratuvar ortamından (P
 KATv1 deneyleri tamamlandı; EfficientNet few-shot'ın gerisinde kaldı. KATv2 (16 agent, 4-head attention, 14×14 feature map) ile val split kaldırılıp sabit epoch eğitimine geçildi. Diversity loss (lambda=0.01) ile epoch 60'ta **acc 0.4565 / balanced 0.4510** elde edildi — ancak bu sonuç test setine bakılarak seçildiği için leaky.
 
 5-fold CV uygulandı: metodolojik olarak temiz best epoch **32**, CV avg val balanced_acc **0.3729**. Epoch 32 ile yeniden eğitilen modelin gerçek test performansı: acc 0.3595 / balanced 0.3545. AdaBN, blocks.6 + conv_head açık olduğunda işe yaramadı — BN stats eğitim sırasında zaten adapte oluyor. Sıradaki: bacterial_spot ve mosaic_virus sınıflarına odaklı strateji.
+
+Focal Loss (gamma=2) eklendi: CV ortalaması 0.3729 → 0.4025 iyileşti ancak test'e yansımadı (ep32: acc 0.3462, balanced 0.3545). KATv2 attention map analizi yapıldı — iki hata türü tespit edildi: görsel benzerlik (bacterial_spot↔septoria) ve hastalık evresi farklılığı (early_blight ileri evrede yellow_virus'a benziyor). FieldPlant veri seti ek test seti olarak değerlendiriliyor.
 
 ---
 
@@ -73,7 +75,9 @@ plant_disease_project/
 | KATv2 Full + div loss — ep60 (leaky) | 0.4565 | 0.4510 | Tamamlandı — leaky |
 | **KATv2 ep32 — CV-temiz (blocks.6+conv_head)** | **0.3595** | **0.3545** | Tamamlandı |
 | KATv2 ep32 + AdaBN           | 0.3512   | 0.3399       | Tamamlandı — AdaBN zararlı |
+| KATv2 ep32 + AdaBN           | 0.3512   | 0.3399       | Tamamlandı — AdaBN zararlı |
 | KATv2 ep60 + AdaBN           | 0.4197   | 0.4158       | Tamamlandı — AdaBN zararlı |
+| KATv2 + FocalLoss ep32       | 0.3462   | 0.3575       | Tamamlandı — CV iyileşti, test'e yansımadı |
 
 Hedef: balanced accuracy > 0.60
 
@@ -96,6 +100,20 @@ Val split kaldırıldı — tüm 146 finetune örneği direkt train'e veriliyor.
 **Best epoch: 32** (avg val balanced_acc = 0.3729)
 
 Fold'lar arası varyans yüksek (0.25–0.51). Fold başına yalnızca ~29 val örneği düşüyor — bu ölçüm gürültüsü yaratıyor. CV fold varyansı, 146 örneklik finetune pool'unun epoch seçimi için çok küçük olduğunu gösteriyor.
+
+### 5-Fold CV — Focal Loss (15 Mayıs 2026)
+
+| Fold | val_acc | val_balanced_acc |
+|------|---------|-----------------|
+| 1    | 0.3333  | 0.3271          |
+| 2    | 0.3448  | 0.3708          |
+| 3    | 0.3448  | 0.3396          |
+| 4    | 0.2414  | 0.1979          |
+| 5    | 0.3103  | 0.3333          |
+
+**Best epoch: 32** (avg val balanced_acc = 0.4025)
+
+CV ortalaması +0.030 iyileşti (0.3729 → 0.4025). Best epoch yine 32 — tutarlı. Ancak test sonucu minimal değişti (balanced 0.3545 → 0.3575). CV iyileşmesi test'e yansımadı — 146 örneklik finetune pool hâlâ temel darboğaz.
 
 ### AdaBN Analizi
 
@@ -159,6 +177,7 @@ finetune_full() eğitim stratejisi:
 - **5-fold CV (13 Mayıs):** best epoch = 32, temiz test sonucu acc 0.3595 / balanced 0.3545. Leakage'ın etkisi: +0.097 balanced acc şişme.
 - **AdaBN (13 Mayıs):** blocks.6 + conv_head açık olduğunda zararlı. BN stats eğitimde zaten adapte oluyor, inference'ta tekrar güncelleme bozuyor.
 - freeze stratejisi: blocks.4 → blocks.6 + conv_head olarak değiştirildi (13 Mayıs).
+- **Focal Loss gamma=2 (15 Mayıs):** CV ortalaması +0.030 iyileşti ama test'e yansımadı. Temel sorun loss fonksiyonu değil, finetune pool büyüklüğü (146 örnek).
 
 ---
 
@@ -193,7 +212,9 @@ Bu iki sınıf toplam F1 ortalamasını en çok aşağı çekiyor. Seçenekler:
 
 **2. Finetune split değiştirme:** Şu an %20 finetune / %80 test. bacterial_spot ve mosaic_virus için bu oran dezavantajlı — finetune pool'da 88×0.2=~18 bacterial_spot örneği var. Split'i %30/%70 yaparak bu sınıflara daha fazla örnek vermek denenebilir. Ancak test set küçülür.
 
-**3. Weighted sampling:** Finetune loader'da az örnekli sınıflara daha yüksek örnekleme ağırlığı ver (WeightedRandomSampler). Mevcut class weight'ler loss'ta var ama sampler'da yok.
+**3. Weighted sampling:** Finetune loader'da az örnekli sınıflara daha yüksek örnekleme ağırlığı ver (WeightedRandomSampler). Mevcut class weight'ler loss'ta var ama sampler'da yok. — Focal Loss ile birlikte kullanılması double-counting riski yaratıyor; önce ayrı denenecek.
+
+**4. FieldPlant veri seti:** Ek test seti olarak değerlendiriliyor — domain gap'in farklı bir saha ortamında nasıl göründüğünü ölçmek için.
 
 **Önemli:** Her deneme `run_cv_v2.py` ile CV'den geçmeli — test seti epoch seçiminde açılmayacak.
 
@@ -201,11 +222,19 @@ Bu iki sınıf toplam F1 ortalamasını en çok aşağı çekiyor. Seçenekler:
 
 ## Attention Map Analizi
 
-`visualize_kat_attention.py` ile PlantDoc test setindeki örneklerin agent attention haritaları incelendi:
+`visualize_kat_attention.py` KATv2 için güncellendi (16 agent, 4-head → head ortalaması, 4×4 grid). `kat_v2_plantdoc_full_best.pth` checkpoint'i ile PlantDoc test setinden her sınıf için 1 görüntü işlendi. Çıktılar: `results/figures/kat_v2_attention/`.
 
-- septoria_leaf_spot (7) ve late_blight (3): agent'lar hastalık bölgelerine net odaklanıyor — F1 sonuçlarıyla örtüşüyor.
-- mold (4): birden fazla yaprak aynı karede; agent'lar hangi yaprağa bakacağını seçemiyor.
-- bacterial_spot (0) ve mosaic_virus (5): backbone PlantVillage'e kilitli kaldığından agent'lar arka plana odaklanıyor.
+**8 örnek üzerinde tahmin sonuçları:** healthy ✓, late_blight ✓, mosaic_virus ✓, septoria ✓ — bacterial_spot ✗ (→ septoria), early_blight ✗ (→ yellow_virus), mold ✗ (→ healthy), yellow_virus ✗ (→ late_blight).
+
+**Tespit edilen iki hata türü:**
+
+1. **Görsel benzerlik karışıklığı:** bacterial_spot → septoria_leaf_spot. Her ikisi de küçük koyu leke morfolojisi; model bu iki sınıfı ayırt edemiyor. Attention haritalarında agent'lar leke bölgelerine odaklanıyor ama hangi leke tipinin hangi sınıfa ait olduğunu öğrenememiş.
+
+2. **Hastalık evresi farklılığı:** early_blight → yellow_virus. early_blight ileri evrede sarımsı doku bozulması gösteriyor; model bunu yellow_virus'un mozaik sarısıyla karıştırıyor. Evre bazlı görsel örtüşme, saha fotoğraflarında daha belirgin.
+
+**Mold watermark sorunu:** Bazı mold görüntülerinde veri seti watermark'ı mevcut. Agent'ların bir kısmı watermark bölgesine odaklanıyor — bu gürültülü bir öğrenme sinyali. mold recall=0.22'nin bir kısmı bu sebepten kaynaklanıyor olabilir.
+
+**Genel gözlem:** late_blight ve septoria'da agent'lar hastalık bölgelerine net odaklanıyor. Düşük F1'li sınıflarda (bacterial_spot, early_blight) agent'lar dağınık veya arka plana odaklanıyor.
 
 ---
 
@@ -253,6 +282,9 @@ Büyük fikirlere atlamak yok. Her adımı birlikte değerlendiriyoruz. Saçmala
 | 13 Mayıs | feat: add apply_adabn() + evaluate_with_adabn() | num_epochs parametrik; AdaBN fonksiyonları   |
 | 13 Mayıs | feat: add run_adabn_v2.py                | AdaBN runner (checkpoint argümanı alır)               |
 | 13 Mayıs | docs: update CLAUDE.md                   | CV sonuçları, AdaBN analizi, sınıf bazlı breakdown    |
+| 15 Mayıs | feat: FocalLoss (gamma=2) — train_fewshot + train_one_fold | CV avg 0.3729→0.4025, test 0.3545→0.3575 |
+| 15 Mayıs | feat: update visualize_kat_attention.py for KATv2 | 16 agent, 4×4 grid, head-averaged attn  |
+| 15 Mayıs | docs: update CLAUDE.md                   | Focal Loss + attention analizi, oturum sonu 15 Mayıs  |
 
 ---
 
